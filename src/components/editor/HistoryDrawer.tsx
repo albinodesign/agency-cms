@@ -10,6 +10,7 @@ interface HistoryDrawerProps {
   open: boolean;
   onClose: () => void;
   onError: (message: string) => void;
+  onSuccess: (message: string) => void;
   /** Wird nach jedem erfolgreichen Publish erhöht und lädt die Liste neu */
   refreshSignal: number;
 }
@@ -33,6 +34,7 @@ export function HistoryDrawer({
   open,
   onClose,
   onError,
+  onSuccess,
   refreshSignal,
 }: HistoryDrawerProps) {
   const [entries, setEntries] = useState<PublishHistoryEntry[]>([]);
@@ -79,7 +81,7 @@ export function HistoryDrawer({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ siteId, historyId: entry.id }),
       });
-      const body = (await res.json()) as { error?: string };
+      const body = (await res.json()) as { error?: string; message?: string };
 
       if (!res.ok) {
         onError(body.error ?? "Wiederherstellung fehlgeschlagen.");
@@ -87,8 +89,13 @@ export function HistoryDrawer({
         return;
       }
 
-      // Editor-Inhalt neu laden, damit der wiederhergestellte Stand angezeigt wird
-      window.location.reload();
+      onSuccess(body.message ?? "Version wurde erfolgreich wiederhergestellt.");
+
+      // Harter Browser-Reload, damit React Formularfelder und Iframe
+      // komplett neu initialisiert (kein router.refresh()!)
+      window.setTimeout(() => {
+        window.location.reload();
+      }, 900);
     } catch {
       onError("Server nicht erreichbar. Bitte später erneut versuchen.");
       setRestoringId(null);
@@ -163,11 +170,16 @@ export function HistoryDrawer({
                   className="mt-3 flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-60"
                 >
                   {restoringId === entry.id ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Stelle wieder her …
+                    </>
                   ) : (
-                    <RotateCcw className="h-3.5 w-3.5" />
+                    <>
+                      <RotateCcw className="h-3.5 w-3.5" />
+                      Wiederherstellen
+                    </>
                   )}
-                  Wiederherstellen
                 </button>
               </li>
             ))}

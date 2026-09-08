@@ -378,6 +378,7 @@ export function EditorClient({
         open={historyOpen}
         onClose={() => setHistoryOpen(false)}
         onError={pushErrorToast}
+        onSuccess={(msg) => pushToast("success", msg)}
         refreshSignal={historyRefresh}
       />
 
