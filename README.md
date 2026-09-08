@@ -1,36 +1,119 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Agency CMS
 
-## Getting Started
+Internes Kunden-CMS einer Webdesign-Agentur. Kunden können Texte und Bilder ihrer auf Vercel gehosteten Astro-Website selbst bearbeiten, ohne Code anzufassen.
 
-First, run the development server:
+**Stack:** Next.js 15 (App Router, TypeScript) · Tailwind CSS · Supabase (Auth + Datenbank, `@supabase/ssr`) · GitHub Contents API (`@octokit/rest`) · lucide-react
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## Setup
+
+1. Abhängigkeiten installieren:
+
+   ```bash
+   npm install
+   ```
+
+2. `.env.local.example` nach `.env.local` kopieren und ausfüllen:
+
+   ```bash
+   NEXT_PUBLIC_SUPABASE_URL=...
+   NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+   GITHUB_TOKEN=...        # Fine-grained PAT mit Contents: Read & Write auf die Kunden-Repos
+   ```
+
+3. Dev-Server starten:
+
+   ```bash
+   npm run dev
+   ```
+
+## Supabase-Datenbankschema
+
+```sql
+create table sites (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  domain text,
+  preview_url text not null,       -- URL der Vercel-Vorschau (Iframe-Quelle)
+  repo_owner text not null,        -- GitHub Owner
+  repo_name text not null          -- GitHub Repo
+);
+
+create table user_sites (
+  user_id uuid references auth.users(id) on delete cascade,
+  site_id uuid references sites(id) on delete cascade,
+  primary key (user_id, site_id)
+);
+
+create table drafts (
+  id uuid primary key default gen_random_uuid(),
+  site_id uuid references sites(id) on delete cascade,
+  field_id text not null,
+  value text not null,
+  updated_at timestamptz not null default now(),
+  unique (site_id, field_id)
+);
+
+create table publish_history (
+  id uuid primary key default gen_random_uuid(),
+  site_id uuid references sites(id) on delete cascade,
+  user_id uuid references auth.users(id),
+  snapshot jsonb not null,
+  created_at timestamptz not null default now()
+);
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Row Level Security aktivieren; Policy-Idee: Nutzer dürfen nur Zeilen sehen/ändern, deren `site_id` in `user_sites` dem eigenen `auth.uid()` zugeordnet ist.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## CMS-Manifest (im Kunden-Repo)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Der Editor rendert seine Felder aus `src/content/cms.manifest.json` im Website-Repo:
 
-## Learn More
+```json
+{
+  "sections": [
+    {
+      "id": "hero",
+      "title": "Hero-Bereich",
+      "fields": [
+        {
+          "id": "hero.title",
+          "label": "Titel",
+          "type": "text",
+          "file": "src/content/pages/home.json",
+          "path": "hero.title"
+        },
+        {
+          "id": "hero.image",
+          "label": "Hintergrundbild",
+          "type": "image",
+          "file": "src/content/pages/home.json",
+          "path": "hero.image"
+        }
+      ]
+    }
+  ]
+}
+```
 
-To learn more about Next.js, take a look at the following resources:
+- `type`: `"text"` → einzeiliges Input, `"textarea"` → mehrzeilig, `"image"` → Bild-URL-Input mit Vorschau
+- `file`: Zieldatei im Repo (wird beim Veröffentlichen per GitHub API aktualisiert)
+- `path`: Dot-Path innerhalb der JSON-Datei
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Live-Vorschau auf der Astro-Website
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Damit Eingaben sofort im Iframe sichtbar werden, muss die Website auf `postMessage`-Events hören:
 
-## Deploy on Vercel
+```js
+window.addEventListener("message", (event) => {
+  const { type, field, value } = event.data ?? {};
+  if (type !== "CMS_FIELD_UPDATE") return;
+  document.querySelectorAll(`[data-cms-field="${field}"]`).forEach((el) => {
+    if (el.tagName === "IMG") el.src = value;
+    else el.textContent = value;
+  });
+});
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Publish-Flow
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+`POST /api/publish` (sessiongeschützt) liest alle Entwürfe einer Site, gruppiert sie nach Zieldatei, aktualisiert die JSON-Dateien über die GitHub Contents API und committet mit `cms: update content by client` auf `main`. Danach wird ein Snapshot in `publish_history` gespeichert und die publizierten Entwürfe aus `drafts` gelöscht. Vercel deployed den Push automatisch.
