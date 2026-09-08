@@ -17,7 +17,8 @@ Internes Kunden-CMS einer Webdesign-Agentur. Kunden können Texte und Bilder ihr
    ```bash
    NEXT_PUBLIC_SUPABASE_URL=...
    NEXT_PUBLIC_SUPABASE_ANON_KEY=...
-   GITHUB_TOKEN=...        # Fine-grained PAT mit Contents: Read & Write auf die Kunden-Repos
+   SUPABASE_SERVICE_ROLE_KEY=...  # nur serverseitig, niemals committen/exponieren (Admin-Panel)
+   GITHUB_TOKEN=...               # Fine-grained PAT mit Contents: Read & Write auf die Kunden-Repos
    ```
 
 3. Dev-Server starten:
@@ -60,6 +61,10 @@ create table publish_history (
   commit_sha text,
   payload jsonb not null,   -- { "src/content/pages/home.json": { ...vollständiger Datei-Inhalt... } }
   created_at timestamptz not null default now()
+);
+
+create table admins (
+  user_id uuid primary key references auth.users(id) on delete cascade
 );
 ```
 
