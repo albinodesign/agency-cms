@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import {
@@ -17,6 +17,7 @@ import type {
   CmsManifest,
   DraftMap,
   ManifestField,
+  ManifestSection,
   Site,
 } from "@/types/cms";
 
@@ -56,6 +57,25 @@ export function EditorClient({
   const [viewport, setViewport] = useState<Viewport>("desktop");
   const [publishing, setPublishing] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
+
+  // Defensives Mapping: akzeptiert Array, { sections } oder { fields }
+  const sections = useMemo<ManifestSection[]>(() => {
+    const raw = manifest as unknown;
+    const list = Array.isArray(raw)
+      ? raw
+      : ((raw as CmsManifest | null)?.sections ??
+        (raw as { fields?: unknown[] } | null)?.fields ??
+        []);
+    if (!Array.isArray(list)) return [];
+    // Falls flaches Feld-Array: in eine Sektion verpacken
+    const looksLikeSections = list.some(
+      (item) => item != null && Array.isArray((item as ManifestSection).fields)
+    );
+    if (looksLikeSections) return list as ManifestSection[];
+    return list.length > 0
+      ? [{ id: "content", title: "Inhalte", fields: list as ManifestField[] }]
+      : [];
+  }, [manifest]);
 
   const pushToast = useCallback((kind: Toast["kind"], message: string) => {
     const id = Date.now() + Math.random();
@@ -194,26 +214,26 @@ export function EditorClient({
         <div className="w-full min-w-0 flex-1 overflow-y-auto border-r border-zinc-200 bg-white lg:w-[40%] lg:flex-none">
           <div className="mx-auto max-w-xl px-6 py-6">
             {manifestError && (
-              <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              <div className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                   <div>
-                    <p className="font-medium">Manifest nicht verfügbar</p>
-                    <p className="mt-1">{manifestError}</p>
+                    <p className="font-semibold">Manifest konnte nicht geladen werden</p>
+                    <p className="mt-1 break-words">{manifestError}</p>
                   </div>
                 </div>
               </div>
             )}
 
-            {manifest?.sections.map((section) => (
-              <section key={section.id} className="mb-8">
+            {sections?.map((section) => (
+              <section key={section?.id} className="mb-8">
                 <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-400">
-                  {section.title}
+                  {section?.title}
                 </h2>
                 <div className="space-y-4 rounded-2xl border border-zinc-200 bg-zinc-50/50 p-5">
-                  {section.fields.map((field) => (
+                  {section?.fields?.map((field) => (
                     <FieldEditor
-                      key={field.id}
+                      key={field?.id}
                       field={field}
                       value={values[field.id] ?? ""}
                       onChange={(v) => handleChange(field.id, v)}
@@ -223,7 +243,7 @@ export function EditorClient({
               </section>
             ))}
 
-            {manifest && manifest.sections.length === 0 && !manifestError && (
+            {!manifestError && sections.length === 0 && (
               <p className="text-sm text-zinc-500">
                 Das Manifest enthält keine bearbeitbaren Sektionen.
               </p>
