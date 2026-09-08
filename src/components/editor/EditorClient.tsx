@@ -67,6 +67,7 @@ export function EditorClient({
   const [viewport, setViewport] = useState<Viewport>("desktop");
   const [publishing, setPublishing] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyRefresh, setHistoryRefresh] = useState(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   // Defensives Mapping: akzeptiert Array, { sections } oder { fields }
@@ -190,6 +191,8 @@ export function EditorClient({
 
       setDirtyFields(new Set());
       setStatus("live");
+      // Verlaufs-Liste sofort neu laden lassen
+      setHistoryRefresh((k) => k + 1);
       pushToast(
         "success",
         body.message ?? "Änderungen wurden veröffentlicht. Die Website wird in wenigen Minuten aktualisiert."
@@ -375,6 +378,7 @@ export function EditorClient({
         open={historyOpen}
         onClose={() => setHistoryOpen(false)}
         onError={pushErrorToast}
+        refreshSignal={historyRefresh}
       />
 
       {/* Toasts */}

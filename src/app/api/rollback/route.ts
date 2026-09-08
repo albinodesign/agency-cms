@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { createOctokit, getManifest, getRepoFile } from "@/lib/github";
-import { setByPath } from "@/lib/json-path";
+import { createOctokit, getRepoFile } from "@/lib/github";
 import type { PublishHistoryEntry, Site } from "@/types/cms";
 
 const COMMIT_MESSAGE = "cms: rollback by client";
@@ -65,61 +64,28 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Version nicht gefunden." }, { status: 404 });
     }
 
-    const snapshot = (entry as PublishHistoryEntry).snapshot ?? {};
-    const snapshotFields = Object.keys(snapshot);
-    if (snapshotFields.length === 0) {
+    const payload = (entry as PublishHistoryEntry).payload;
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      Array.isArray(payload) ||
+      Object.keys(payload).length === 0
+    ) {
       return NextResponse.json(
-        { error: "Diese Version enthält keinen Snapshot." },
+        { error: "Diese Version enthält keinen wiederherstellbaren Payload." },
         { status: 400 }
       );
     }
 
-    // Manifest laden, um Feld-ID -> Datei/Pfad aufzulösen
     const octokit = createOctokit();
-    let manifest;
-    try {
-      manifest = await getManifest(octokit, typedSite.repo_owner, typedSite.repo_name);
-    } catch (err) {
-      return NextResponse.json(
-        {
-          error: `CMS-Manifest konnte nicht aus GitHub geladen werden: ${
-            err instanceof Error ? err.message : "Unbekannter Fehler"
-          }`,
-        },
-        { status: 502 }
-      );
-    }
+    let lastCommitSha: string | null = null;
 
-    const fieldMap = new Map(
-      manifest.sections.flatMap((s) => s.fields.map((f) => [f.id, f] as const))
-    );
-
-    // Snapshot-Felder nach Zieldatei gruppieren
-    const byFile = new Map<string, { path: string; value: string }[]>();
-    for (const fieldId of snapshotFields) {
-      const field = fieldMap.get(fieldId);
-      if (!field) continue;
-      const list = byFile.get(field.file) ?? [];
-      list.push({ path: field.path, value: snapshot[fieldId] });
-      byFile.set(field.file, list);
-    }
-
-    if (byFile.size === 0) {
-      return NextResponse.json(
-        { error: "Der Snapshot konnte keinen Feldern im Manifest zugeordnet werden." },
-        { status: 400 }
-      );
-    }
-
-    // Dateien laden, Snapshot-Werte anwenden, committen
-    const restoredFields: string[] = [];
-    for (const [filePath, entries] of byFile) {
-      let json: Record<string, unknown>;
+    // Jede Datei im Payload auf den gespeicherten Stand zurücksetzen
+    for (const [filePath, content] of Object.entries(payload)) {
       let sha: string;
       try {
         const file = await getRepoFile(octokit, typedSite.repo_owner, typedSite.repo_name, filePath);
         sha = file.sha;
-        json = JSON.parse(file.text) as Record<string, unknown>;
       } catch (err) {
         return NextResponse.json(
           {
@@ -131,20 +97,20 @@ export async function POST(request: Request) {
         );
       }
 
-      for (const { path, value } of entries) {
-        setByPath(json, path, value);
-      }
-
       try {
-        await octokit.repos.createOrUpdateFileContents({
+        const { data: commitData } = await octokit.repos.createOrUpdateFileContents({
           owner: typedSite.repo_owner,
           repo: typedSite.repo_name,
           path: filePath,
           message: COMMIT_MESSAGE,
-          content: Buffer.from(JSON.stringify(json, null, 2), "utf-8").toString("base64"),
+          content: Buffer.from(
+            JSON.stringify(content, null, 2),
+            "utf-8"
+          ).toString("base64"),
           sha,
           branch: "main",
         });
+        lastCommitSha = commitData.commit.sha ?? null;
       } catch (err) {
         return NextResponse.json(
           {
@@ -155,30 +121,36 @@ export async function POST(request: Request) {
           { status: 502 }
         );
       }
-
-      restoredFields.push(
-        ...snapshotFields.filter((id) => fieldMap.get(id)?.file === filePath)
-      );
     }
 
     // Wiederherstellung als neue Version im Verlauf dokumentieren
-    await supabase.from("publish_history").insert({
+    const { error: historyError } = await supabase.from("publish_history").insert({
       site_id: siteId,
-      user_id: user.id,
-      user_email: user.email ?? null,
-      snapshot,
+      published_by: user.id ?? null,
+      commit_sha: lastCommitSha,
+      payload,
     });
 
-    // Editor-Stand zurücksetzen: Drafts der wiederhergestellten Felder löschen
-    await supabase
+    if (historyError) {
+      console.error("publish_history insert (Rollback) fehlgeschlagen:", historyError);
+    } else {
+      console.log(
+        `publish_history: Rollback für Site ${siteId} gespeichert (Commit ${lastCommitSha ?? "unbekannt"})`
+      );
+    }
+
+    // Editor-Stand zurücksetzen: alle offenen Entwürfe der Site verwerfen
+    const { error: deleteError } = await supabase
       .from("drafts")
       .delete()
-      .eq("site_id", siteId)
-      .in("field_id", restoredFields);
+      .eq("site_id", siteId);
+
+    if (deleteError) {
+      console.error("drafts delete (Rollback) fehlgeschlagen:", deleteError.message);
+    }
 
     return NextResponse.json({
-      message: `Version wiederhergestellt (${restoredFields.length} Feld(er)).`,
-      restoredFields,
+      message: `Version wiederhergestellt (${Object.keys(payload).length} Datei(en)).`,
     });
   } catch (err) {
     console.error("Rollback fehlgeschlagen:", err);

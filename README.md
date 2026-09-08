@@ -56,9 +56,9 @@ create table drafts (
 create table publish_history (
   id uuid primary key default gen_random_uuid(),
   site_id uuid references sites(id) on delete cascade,
-  user_id uuid references auth.users(id),
-  user_email text,
-  snapshot jsonb not null,
+  published_by uuid references auth.users(id),
+  commit_sha text,
+  payload jsonb not null,   -- { "src/content/pages/home.json": { ...vollständiger Datei-Inhalt... } }
   created_at timestamptz not null default now()
 );
 ```

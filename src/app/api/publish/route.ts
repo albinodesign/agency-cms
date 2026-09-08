@@ -114,6 +114,9 @@ export async function POST(request: Request) {
 
     // Dateien aus GitHub laden, aktualisieren und committen
     const committedFields: string[] = [];
+    const payload: Record<string, Record<string, unknown>> = {};
+    let lastCommitSha: string | null = null;
+
     for (const [filePath, fileDrafts] of draftsByFile) {
       let json: Record<string, unknown>;
       let sha: string;
@@ -138,7 +141,7 @@ export async function POST(request: Request) {
       }
 
       try {
-        await octokit.repos.createOrUpdateFileContents({
+        const { data: commitData } = await octokit.repos.createOrUpdateFileContents({
           owner: typedSite.repo_owner,
           repo: typedSite.repo_name,
           path: filePath,
@@ -147,6 +150,7 @@ export async function POST(request: Request) {
           sha,
           branch: "main",
         });
+        lastCommitSha = commitData.commit.sha ?? null;
       } catch (err) {
         return NextResponse.json(
           {
@@ -159,27 +163,32 @@ export async function POST(request: Request) {
       }
 
       committedFields.push(...fileDrafts.map((d) => d.field_id));
+      // Vollständiges, aktualisiertes JSON-Objekt der Datei für den Verlauf merken
+      payload[filePath] = json;
     }
 
-    // Snapshot in publish_history speichern
-    const snapshot: Record<string, string> = {};
-    for (const draft of typedDrafts) {
-      if (committedFields.includes(draft.field_id)) {
-        snapshot[draft.field_id] = draft.value;
-      }
-    }
-
+    // Snapshot in publish_history speichern (vollständiger Payload pro Datei)
     const { error: historyError } = await supabase.from("publish_history").insert({
       site_id: siteId,
-      user_id: user.id,
-      user_email: user.email ?? null,
-      snapshot,
+      published_by: user.id ?? null,
+      commit_sha: lastCommitSha,
+      payload,
     });
 
     if (historyError) {
-      // Commit ist bereits erfolgt – nur melden, nicht fehlschlagen
-      console.error("publish_history insert fehlgeschlagen:", historyError.message);
+      // Der GitHub-Commit ist bereits erfolgt – Fehler laut melden statt verschlucken
+      console.error("publish_history insert fehlgeschlagen:", historyError);
+      return NextResponse.json(
+        {
+          error: `Die Änderungen wurden zu GitHub übertragen, aber der Verlaufseintrag konnte nicht gespeichert werden: ${historyError.message}`,
+        },
+        { status: 500 }
+      );
     }
+
+    console.log(
+      `publish_history: Eintrag für Site ${siteId} gespeichert (Commit ${lastCommitSha ?? "unbekannt"}, ${committedFields.length} Feld(er))`
+    );
 
     // Publizierte Entwürfe löschen
     const { error: deleteError } = await supabase

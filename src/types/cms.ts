@@ -45,9 +45,10 @@ export interface Draft {
 export interface PublishHistoryEntry {
   id: string;
   site_id: string;
-  user_id: string;
-  user_email: string | null;
-  snapshot: Record<string, string>;
+  published_by: string | null;
+  commit_sha: string | null;
+  /** Vollständige Datei-Inhalte, verschachtelt nach Dateipfad: { "src/content/pages/home.json": { ... } } */
+  payload: Record<string, Record<string, unknown>>;
   created_at: string;
 }
 
