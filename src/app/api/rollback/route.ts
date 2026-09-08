@@ -2,9 +2,9 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createOctokit, getManifest, getRepoFile } from "@/lib/github";
 import { setByPath } from "@/lib/json-path";
-import type { Draft, Site } from "@/types/cms";
+import type { PublishHistoryEntry, Site } from "@/types/cms";
 
-const COMMIT_MESSAGE = "cms: update content by client";
+const COMMIT_MESSAGE = "cms: rollback by client";
 
 export async function POST(request: Request) {
   try {
@@ -17,16 +17,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Nicht authentifiziert." }, { status: 401 });
     }
 
-    let body: { siteId?: string };
+    let body: { siteId?: string; historyId?: string };
     try {
       body = await request.json();
     } catch {
       return NextResponse.json({ error: "Ungültiger Request-Body." }, { status: 400 });
     }
 
-    const siteId = body.siteId;
-    if (!siteId || typeof siteId !== "string") {
-      return NextResponse.json({ error: "siteId fehlt." }, { status: 400 });
+    const { siteId, historyId } = body;
+    if (!siteId || !historyId) {
+      return NextResponse.json({ error: "siteId oder historyId fehlt." }, { status: 400 });
     }
 
     // Zugriff prüfen
@@ -53,22 +53,25 @@ export async function POST(request: Request) {
 
     const typedSite = site as Site;
 
-    // Alle Entwürfe dieser Site laden
-    const { data: drafts, error: draftsError } = await supabase
-      .from("drafts")
+    // History-Eintrag laden
+    const { data: entry, error: entryError } = await supabase
+      .from("publish_history")
       .select("*")
-      .eq("site_id", siteId);
+      .eq("id", historyId)
+      .eq("site_id", siteId)
+      .single();
 
-    if (draftsError) {
-      return NextResponse.json(
-        { error: `Entwürfe konnten nicht geladen werden: ${draftsError.message}` },
-        { status: 500 }
-      );
+    if (entryError || !entry) {
+      return NextResponse.json({ error: "Version nicht gefunden." }, { status: 404 });
     }
 
-    const typedDrafts = (drafts ?? []) as Draft[];
-    if (typedDrafts.length === 0) {
-      return NextResponse.json({ message: "Keine unveröffentlichten Änderungen vorhanden." });
+    const snapshot = (entry as PublishHistoryEntry).snapshot ?? {};
+    const snapshotFields = Object.keys(snapshot);
+    if (snapshotFields.length === 0) {
+      return NextResponse.json(
+        { error: "Diese Version enthält keinen Snapshot." },
+        { status: 400 }
+      );
     }
 
     // Manifest laden, um Feld-ID -> Datei/Pfad aufzulösen
@@ -91,30 +94,26 @@ export async function POST(request: Request) {
       manifest.sections.flatMap((s) => s.fields.map((f) => [f.id, f] as const))
     );
 
-    // Entwürfe nach Zieldatei gruppieren
-    const draftsByFile = new Map<string, Draft[]>();
-    const skipped: string[] = [];
-    for (const draft of typedDrafts) {
-      const field = fieldMap.get(draft.field_id);
-      if (!field) {
-        skipped.push(draft.field_id);
-        continue;
-      }
-      const list = draftsByFile.get(field.file) ?? [];
-      list.push(draft);
-      draftsByFile.set(field.file, list);
+    // Snapshot-Felder nach Zieldatei gruppieren
+    const byFile = new Map<string, { path: string; value: string }[]>();
+    for (const fieldId of snapshotFields) {
+      const field = fieldMap.get(fieldId);
+      if (!field) continue;
+      const list = byFile.get(field.file) ?? [];
+      list.push({ path: field.path, value: snapshot[fieldId] });
+      byFile.set(field.file, list);
     }
 
-    if (draftsByFile.size === 0) {
+    if (byFile.size === 0) {
       return NextResponse.json(
-        { error: "Keine Entwürfe konnten Feldern im Manifest zugeordnet werden." },
+        { error: "Der Snapshot konnte keinen Feldern im Manifest zugeordnet werden." },
         { status: 400 }
       );
     }
 
-    // Dateien aus GitHub laden, aktualisieren und committen
-    const committedFields: string[] = [];
-    for (const [filePath, fileDrafts] of draftsByFile) {
+    // Dateien laden, Snapshot-Werte anwenden, committen
+    const restoredFields: string[] = [];
+    for (const [filePath, entries] of byFile) {
       let json: Record<string, unknown>;
       let sha: string;
       try {
@@ -132,9 +131,8 @@ export async function POST(request: Request) {
         );
       }
 
-      for (const draft of fileDrafts) {
-        const field = fieldMap.get(draft.field_id)!;
-        setByPath(json, field.path, draft.value);
+      for (const { path, value } of entries) {
+        setByPath(json, path, value);
       }
 
       try {
@@ -158,51 +156,32 @@ export async function POST(request: Request) {
         );
       }
 
-      committedFields.push(...fileDrafts.map((d) => d.field_id));
+      restoredFields.push(
+        ...snapshotFields.filter((id) => fieldMap.get(id)?.file === filePath)
+      );
     }
 
-    // Snapshot in publish_history speichern
-    const snapshot: Record<string, string> = {};
-    for (const draft of typedDrafts) {
-      if (committedFields.includes(draft.field_id)) {
-        snapshot[draft.field_id] = draft.value;
-      }
-    }
-
-    const { error: historyError } = await supabase.from("publish_history").insert({
+    // Wiederherstellung als neue Version im Verlauf dokumentieren
+    await supabase.from("publish_history").insert({
       site_id: siteId,
       user_id: user.id,
       user_email: user.email ?? null,
       snapshot,
     });
 
-    if (historyError) {
-      // Commit ist bereits erfolgt – nur melden, nicht fehlschlagen
-      console.error("publish_history insert fehlgeschlagen:", historyError.message);
-    }
-
-    // Publizierte Entwürfe löschen
-    const { error: deleteError } = await supabase
+    // Editor-Stand zurücksetzen: Drafts der wiederhergestellten Felder löschen
+    await supabase
       .from("drafts")
       .delete()
       .eq("site_id", siteId)
-      .in("field_id", committedFields);
-
-    if (deleteError) {
-      console.error("drafts delete fehlgeschlagen:", deleteError.message);
-    }
-
-    const skippedNote =
-      skipped.length > 0
-        ? ` ${skipped.length} Feld(er) ohne Manifest-Zuordnung wurden übersprungen.`
-        : "";
+      .in("field_id", restoredFields);
 
     return NextResponse.json({
-      message: `${committedFields.length} Änderung(en) veröffentlicht.${skippedNote}`,
-      publishedFields: committedFields,
+      message: `Version wiederhergestellt (${restoredFields.length} Feld(er)).`,
+      restoredFields,
     });
   } catch (err) {
-    console.error("Publish fehlgeschlagen:", err);
+    console.error("Rollback fehlgeschlagen:", err);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Interner Serverfehler." },
       { status: 500 }

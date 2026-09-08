@@ -3,14 +3,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
+import { ImageField } from "@/components/editor/ImageField";
+import { HistoryDrawer } from "@/components/editor/HistoryDrawer";
 import {
+  AlertTriangle,
   ArrowLeft,
   CheckCircle2,
+  ChevronDown,
+  History,
   Loader2,
   Monitor,
-  Smartphone,
   Rocket,
-  AlertTriangle,
+  Smartphone,
   X,
 } from "lucide-react";
 import type {
@@ -28,7 +32,11 @@ interface EditorClientProps {
   site: Site;
   manifest: CmsManifest | null;
   manifestError: string | null;
-  initialDrafts: DraftMap;
+  contentWarning: string | null;
+  /** Live-Werte aus GitHub, bereits mit Drafts gemergt */
+  initialValues: DraftMap;
+  /** Feld-IDs, zu denen ein unveröffentlichter Draft existiert */
+  draftFields: string[];
 }
 
 interface Toast {
@@ -41,21 +49,24 @@ export function EditorClient({
   site,
   manifest,
   manifestError,
-  initialDrafts,
+  contentWarning,
+  initialValues,
+  draftFields,
 }: EditorClientProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const timersRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const pendingRef = useRef(0);
 
-  const [values, setValues] = useState<DraftMap>(initialDrafts);
+  const [values, setValues] = useState<DraftMap>(initialValues);
   const [dirtyFields, setDirtyFields] = useState<Set<string>>(
-    () => new Set(Object.keys(initialDrafts))
+    () => new Set(draftFields)
   );
   const [status, setStatus] = useState<SaveStatus>(
-    Object.keys(initialDrafts).length > 0 ? "saved" : "live"
+    draftFields.length > 0 ? "saved" : "live"
   );
   const [viewport, setViewport] = useState<Viewport>("desktop");
   const [publishing, setPublishing] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   // Defensives Mapping: akzeptiert Array, { sections } oder { fields }
@@ -77,6 +88,11 @@ export function EditorClient({
       : [];
   }, [manifest]);
 
+  // Akkordeon: erste Sektion standardmäßig geöffnet
+  const [openSections, setOpenSections] = useState<Set<string>>(
+    () => new Set(sections[0] ? [sections[0].id] : [])
+  );
+
   const pushToast = useCallback((kind: Toast["kind"], message: string) => {
     const id = Date.now() + Math.random();
     setToasts((prev) => [...prev, { id, kind, message }]);
@@ -85,11 +101,25 @@ export function EditorClient({
     }, 5000);
   }, []);
 
+  const pushErrorToast = useCallback(
+    (message: string) => pushToast("error", message),
+    [pushToast]
+  );
+
   useEffect(() => {
     const timers = timersRef.current;
     return () => {
       timers.forEach((t) => clearTimeout(t));
     };
+  }, []);
+
+  const toggleSection = useCallback((sectionId: string) => {
+    setOpenSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(sectionId)) next.delete(sectionId);
+      else next.add(sectionId);
+      return next;
+    });
   }, []);
 
   const saveDraft = useCallback(
@@ -191,8 +221,15 @@ export function EditorClient({
           </h1>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
           <StatusBadge status={status} hasDrafts={hasDrafts} />
+          <button
+            onClick={() => setHistoryOpen(true)}
+            className="flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-100"
+          >
+            <History className="h-4 w-4" />
+            <span className="hidden sm:inline">Verlauf</span>
+          </button>
           <button
             onClick={handlePublish}
             disabled={publishing}
@@ -214,7 +251,7 @@ export function EditorClient({
         <div className="w-full min-w-0 flex-1 overflow-y-auto border-r border-zinc-200 bg-white lg:w-[40%] lg:flex-none">
           <div className="mx-auto max-w-xl px-6 py-6">
             {manifestError && (
-              <div className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
+              <div className="mb-6 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                   <div>
@@ -225,23 +262,59 @@ export function EditorClient({
               </div>
             )}
 
-            {sections?.map((section) => (
-              <section key={section?.id} className="mb-8">
-                <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-400">
-                  {section?.title}
-                </h2>
-                <div className="space-y-4 rounded-2xl border border-zinc-200 bg-zinc-50/50 p-5">
-                  {section?.fields?.map((field) => (
-                    <FieldEditor
-                      key={field?.id}
-                      field={field}
-                      value={values[field.id] ?? ""}
-                      onChange={(v) => handleChange(field.id, v)}
-                    />
-                  ))}
+            {contentWarning && (
+              <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <p className="break-words">{contentWarning}</p>
                 </div>
-              </section>
-            ))}
+              </div>
+            )}
+
+            {sections?.map((section) => {
+              const isOpen = openSections.has(section.id);
+              return (
+                <section
+                  key={section?.id}
+                  className="mb-4 overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50/50"
+                >
+                  <button
+                    type="button"
+                    onClick={() => toggleSection(section.id)}
+                    className="flex w-full items-center justify-between px-5 py-4 text-left transition hover:bg-zinc-100"
+                  >
+                    <span className="text-sm font-semibold text-zinc-900">
+                      {section?.title}
+                    </span>
+                    <span className="flex items-center gap-2">
+                      <span className="text-xs text-zinc-400">
+                        {section?.fields?.length ?? 0} Feld(er)
+                      </span>
+                      <ChevronDown
+                        className={`h-4 w-4 text-zinc-500 transition-transform duration-200 ${
+                          isOpen ? "rotate-180" : ""
+                        }`}
+                      />
+                    </span>
+                  </button>
+
+                  {isOpen && (
+                    <div className="space-y-4 border-t border-zinc-200 px-5 py-5">
+                      {section?.fields?.map((field) => (
+                        <FieldEditor
+                          key={field?.id}
+                          field={field}
+                          value={values[field.id] ?? ""}
+                          siteId={site.id}
+                          onChange={(v) => handleChange(field.id, v)}
+                          onError={pushErrorToast}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </section>
+              );
+            })}
 
             {!manifestError && sections.length === 0 && (
               <p className="text-sm text-zinc-500">
@@ -295,6 +368,14 @@ export function EditorClient({
           </div>
         </div>
       </div>
+
+      {/* Verlauf-Drawer */}
+      <HistoryDrawer
+        siteId={site.id}
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        onError={pushErrorToast}
+      />
 
       {/* Toasts */}
       <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-80 flex-col gap-2">
@@ -362,14 +443,35 @@ function StatusBadge({
 function FieldEditor({
   field,
   value,
+  siteId,
   onChange,
+  onError,
 }: {
   field: ManifestField;
   value: string;
+  siteId: string;
   onChange: (value: string) => void;
+  onError: (message: string) => void;
 }) {
   const baseClass =
     "w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10";
+
+  const counter = field.maxLength
+    ? `${value.length} / ${field.maxLength} Zeichen`
+    : `${value.length} Zeichen`;
+  const counterTooLong = field.maxLength != null && value.length > field.maxLength;
+
+  if (field.type === "image") {
+    return (
+      <ImageField
+        field={field}
+        value={value}
+        siteId={siteId}
+        onChange={onChange}
+        onError={onError}
+      />
+    );
+  }
 
   return (
     <div>
@@ -382,6 +484,7 @@ function FieldEditor({
           type="text"
           value={value}
           placeholder={field.placeholder}
+          maxLength={field.maxLength}
           onChange={(e) => onChange(e.target.value)}
           className={baseClass}
         />
@@ -391,34 +494,20 @@ function FieldEditor({
         <textarea
           value={value}
           placeholder={field.placeholder}
+          maxLength={field.maxLength}
           onChange={(e) => onChange(e.target.value)}
           rows={4}
           className={`${baseClass} resize-y`}
         />
       )}
 
-      {field.type === "image" && (
-        <div className="space-y-2">
-          <input
-            type="url"
-            value={value}
-            placeholder={field.placeholder ?? "https://…/bild.jpg"}
-            onChange={(e) => onChange(e.target.value)}
-            className={baseClass}
-          />
-          {value && (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={value}
-              alt={field.label}
-              className="h-24 w-auto rounded-lg border border-zinc-200 object-cover"
-              onError={(e) => {
-                (e.target as HTMLImageElement).style.display = "none";
-              }}
-            />
-          )}
-        </div>
-      )}
+      <p
+        className={`mt-1 text-right text-xs ${
+          counterTooLong ? "font-medium text-red-600" : "text-zinc-400"
+        }`}
+      >
+        {counter}
+      </p>
     </div>
   );
 }

@@ -10,6 +10,8 @@ export interface ManifestField {
   /** Dot-Path innerhalb der JSON-Datei, z. B. "hero.title" */
   path: string;
   placeholder?: string;
+  /** Optionale Zeichenbegrenzung für den Zeichenzähler */
+  maxLength?: number;
 }
 
 export interface ManifestSection {
@@ -38,6 +40,15 @@ export interface Draft {
   field_id: string;
   value: string;
   updated_at: string;
+}
+
+export interface PublishHistoryEntry {
+  id: string;
+  site_id: string;
+  user_id: string;
+  user_email: string | null;
+  snapshot: Record<string, string>;
+  created_at: string;
 }
 
 export type DraftMap = Record<string, string>;

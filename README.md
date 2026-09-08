@@ -57,12 +57,30 @@ create table publish_history (
   id uuid primary key default gen_random_uuid(),
   site_id uuid references sites(id) on delete cascade,
   user_id uuid references auth.users(id),
+  user_email text,
   snapshot jsonb not null,
   created_at timestamptz not null default now()
 );
 ```
 
 Row Level Security aktivieren; Policy-Idee: Nutzer dürfen nur Zeilen sehen/ändern, deren `site_id` in `user_sites` dem eigenen `auth.uid()` zugeordnet ist.
+
+## Supabase Storage (Bild-Uploads)
+
+Bilder aus `type: "image"`-Feldern werden clientseitig in den Bucket `cms-media` hochgeladen (Pfad: `sites/{siteId}/{timestamp}-{dateiname}`).
+
+1. Bucket `cms-media` anlegen und als **public** markieren.
+2. Storage-Policy: authentifizierte Nutzer dürfen hochladen/lesen, z. B.:
+
+   ```sql
+   create policy "authenticated users can upload cms-media"
+   on storage.objects for insert to authenticated
+   with check (bucket_id = 'cms-media');
+
+   create policy "public read cms-media"
+   on storage.objects for select to public
+   using (bucket_id = 'cms-media');
+   ```
 
 ## CMS-Manifest (im Kunden-Repo)
 
