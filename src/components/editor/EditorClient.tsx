@@ -5,15 +5,21 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { ImageField } from "@/components/editor/ImageField";
 import { HistoryDrawer } from "@/components/editor/HistoryDrawer";
+import { BlogPanel } from "@/components/editor/BlogPanel";
 import {
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
   ChevronDown,
+  ChevronsDownUp,
+  ChevronsUpDown,
+  FileText,
   History,
   Loader2,
   Monitor,
+  Newspaper,
   Rocket,
+  Search,
   Smartphone,
   X,
 } from "lucide-react";
@@ -69,6 +75,14 @@ export function EditorClient({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyRefresh, setHistoryRefresh] = useState(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [activeTab, setActiveTab] = useState<"content" | "blog">("content");
+  const [searchQuery, setSearchQuery] = useState("");
+
+  // Blog-Feature aktiviert? (features.blog === true oder features.blog.enabled === true)
+  const blogEnabled = useMemo(() => {
+    const blog = (manifest as CmsManifest | null)?.features?.blog;
+    return blog === true || (typeof blog === "object" && blog?.enabled === true);
+  }, [manifest]);
 
   // Defensives Mapping: akzeptiert Array, { sections } oder { fields }
   const sections = useMemo<ManifestSection[]>(() => {
@@ -93,6 +107,33 @@ export function EditorClient({
   const [openSections, setOpenSections] = useState<Set<string>>(
     () => new Set(sections[0] ? [sections[0].id] : [])
   );
+
+  // Suche: Sektionen/Felder filtern (Label, Key oder Sektions-Titel)
+  const filteredSections = useMemo<ManifestSection[]>(() => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return sections;
+    return sections
+      .map((section) => {
+        const sectionMatches = section.title.toLowerCase().includes(query);
+        const fields = sectionMatches
+          ? section.fields
+          : (section.fields ?? []).filter(
+              (f) =>
+                f.label.toLowerCase().includes(query) ||
+                f.id.toLowerCase().includes(query)
+            );
+        return { ...section, fields };
+      })
+      .filter((s) => s.fields.length > 0);
+  }, [sections, searchQuery]);
+
+  const expandAll = useCallback(() => {
+    setOpenSections(new Set(sections.map((s) => s.id)));
+  }, [sections]);
+
+  const collapseAll = useCallback(() => {
+    setOpenSections(new Set());
+  }, []);
 
   const pushToast = useCallback((kind: Toast["kind"], message: string) => {
     const id = Date.now() + Math.random();
@@ -274,55 +315,132 @@ export function EditorClient({
               </div>
             )}
 
-            {sections?.map((section) => {
-              const isOpen = openSections.has(section.id);
-              return (
-                <section
-                  key={section?.id}
-                  className="mb-4 overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50/50"
+            {/* Tabs: nur wenn das Blog-Feature im Manifest aktiviert ist */}
+            {blogEnabled && !manifestError && (
+              <div className="mb-6 flex rounded-xl border border-zinc-200 bg-zinc-100 p-1">
+                <button
+                  onClick={() => setActiveTab("content")}
+                  className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                    activeTab === "content"
+                      ? "bg-white text-zinc-900 shadow-sm"
+                      : "text-zinc-500 hover:text-zinc-700"
+                  }`}
                 >
-                  <button
-                    type="button"
-                    onClick={() => toggleSection(section.id)}
-                    className="flex w-full items-center justify-between px-5 py-4 text-left transition hover:bg-zinc-100"
-                  >
-                    <span className="text-sm font-semibold text-zinc-900">
-                      {section?.title}
-                    </span>
-                    <span className="flex items-center gap-2">
-                      <span className="text-xs text-zinc-400">
-                        {section?.fields?.length ?? 0} Feld(er)
-                      </span>
-                      <ChevronDown
-                        className={`h-4 w-4 text-zinc-500 transition-transform duration-200 ${
-                          isOpen ? "rotate-180" : ""
-                        }`}
+                  <FileText className="h-4 w-4" />
+                  Seiten-Inhalte
+                </button>
+                <button
+                  onClick={() => setActiveTab("blog")}
+                  className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                    activeTab === "blog"
+                      ? "bg-white text-zinc-900 shadow-sm"
+                      : "text-zinc-500 hover:text-zinc-700"
+                  }`}
+                >
+                  <Newspaper className="h-4 w-4" />
+                  Blog-Artikel
+                </button>
+              </div>
+            )}
+
+            {blogEnabled && activeTab === "blog" && !manifestError ? (
+              <BlogPanel
+                siteId={site.id}
+                onError={pushErrorToast}
+                onSuccess={(msg) => pushToast("success", msg)}
+              />
+            ) : (
+              <>
+                {/* Suche + Akkordeon-Steuerung */}
+                {!manifestError && sections.length > 0 && (
+                  <div className="mb-5 space-y-3">
+                    <div className="relative">
+                      <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+                      <input
+                        type="text"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="Feld suchen …"
+                        className="w-full rounded-lg border border-zinc-300 bg-white py-2 pl-9 pr-3 text-sm outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10"
                       />
-                    </span>
-                  </button>
-
-                  {isOpen && (
-                    <div className="space-y-4 border-t border-zinc-200 px-5 py-5">
-                      {section?.fields?.map((field) => (
-                        <FieldEditor
-                          key={field?.id}
-                          field={field}
-                          value={values[field.id] ?? ""}
-                          siteId={site.id}
-                          onChange={(v) => handleChange(field.id, v)}
-                          onError={pushErrorToast}
-                        />
-                      ))}
                     </div>
-                  )}
-                </section>
-              );
-            })}
+                    <div className="flex justify-end gap-2">
+                      <button
+                        onClick={expandAll}
+                        className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-700"
+                      >
+                        <ChevronsUpDown className="h-3.5 w-3.5" />
+                        Alle aufklappen
+                      </button>
+                      <button
+                        onClick={collapseAll}
+                        className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-700"
+                      >
+                        <ChevronsDownUp className="h-3.5 w-3.5" />
+                        Alle einklappen
+                      </button>
+                    </div>
+                  </div>
+                )}
 
-            {!manifestError && sections.length === 0 && (
-              <p className="text-sm text-zinc-500">
-                Das Manifest enthält keine bearbeitbaren Sektionen.
-              </p>
+                {filteredSections?.map((section) => {
+                  // Bei aktiver Suche alle Treffer geöffnet anzeigen
+                  const isOpen =
+                    searchQuery.trim() !== "" || openSections.has(section.id);
+                  return (
+                    <section
+                      key={section?.id}
+                      className="mb-4 overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50/50"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => toggleSection(section.id)}
+                        className="flex w-full items-center justify-between px-5 py-4 text-left transition hover:bg-zinc-100"
+                      >
+                        <span className="text-sm font-semibold text-zinc-900">
+                          {section?.title}{" "}
+                          <span className="font-normal text-zinc-400">
+                            ({section?.fields?.length ?? 0}{" "}
+                            {section?.fields?.length === 1 ? "Feld" : "Felder"})
+                          </span>
+                        </span>
+                        <ChevronDown
+                          className={`h-4 w-4 text-zinc-500 transition-transform duration-200 ${
+                            isOpen ? "rotate-180" : ""
+                          }`}
+                        />
+                      </button>
+
+                      {isOpen && (
+                        <div className="space-y-4 border-t border-zinc-200 px-5 py-5">
+                          {section?.fields?.map((field) => (
+                            <FieldEditor
+                              key={field?.id}
+                              field={field}
+                              value={values[field.id] ?? ""}
+                              siteId={site.id}
+                              onChange={(v) => handleChange(field.id, v)}
+                              onError={pushErrorToast}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </section>
+                  );
+                })}
+
+                {!manifestError && searchQuery.trim() !== "" && filteredSections.length === 0 && (
+                  <p className="py-6 text-center text-sm text-zinc-500">
+                    Keine Felder gefunden für &bdquo;{searchQuery.trim()}&ldquo;.
+                  </p>
+                )}
+
+                {!manifestError && sections.length === 0 && (
+                  <p className="text-sm text-zinc-500">
+                    Das Manifest enthält keine bearbeitbaren Sektionen.
+                  </p>
+                )}
+              </>
             )}
           </div>
         </div>

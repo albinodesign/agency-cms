@@ -87,7 +87,10 @@ export function normalizeManifest(raw: unknown): CmsManifest {
     : ((raw as CmsManifest)?.sections ?? (raw as { fields?: unknown[] })?.fields ?? []);
 
   if (!Array.isArray(candidate)) {
-    return { sections: [] };
+    return {
+      sections: [],
+      features: Array.isArray(raw) ? undefined : (raw as CmsManifest)?.features,
+    };
   }
 
   // Unterscheidung: Array von Sektionen (mit .fields) oder flaches Feld-Array
@@ -114,7 +117,11 @@ export function normalizeManifest(raw: unknown): CmsManifest {
     }))
     .filter((s) => s.fields.length > 0);
 
-  return { sections };
+  const features = Array.isArray(raw)
+    ? undefined
+    : (raw as CmsManifest)?.features;
+
+  return { sections, features };
 }
 
 export async function getManifest(

@@ -121,6 +121,20 @@ Der Editor rendert seine Felder aus `src/content/cms.manifest.json` im Website-R
 - `type`: `"text"` → einzeiliges Input, `"textarea"` → mehrzeilig, `"image"` → Bild-URL-Input mit Vorschau
 - `file`: Zieldatei im Repo (wird beim Veröffentlichen per GitHub API aktualisiert)
 - `path`: Dot-Path innerhalb der JSON-Datei
+- `maxLength` (optional): Zeichenbegrenzung inkl. Zähler im Editor
+
+## Blog-Engine
+
+Wenn das Manifest das Blog-Feature aktiviert, erscheint im Editor ein zweiter Tab „Blog-Artikel":
+
+```json
+{
+  "features": { "blog": true },
+  "sections": [ ... ]
+}
+```
+
+Artikel werden als Markdown-Dateien mit Frontmatter in `src/content/blog/` des Website-Repos verwaltet (API: `GET`/`POST`/`DELETE /api/blog`, Commits: `cms: save blog post [slug]` / `cms: delete blog post [slug]`). Das Frontmatter enthält `title`, `slug`, `date`, `coverImage`, `excerpt` und `draft`.
 
 ## Live-Vorschau auf der Astro-Website
 

@@ -22,6 +22,25 @@ export interface ManifestSection {
 
 export interface CmsManifest {
   sections: ManifestSection[];
+  /** Optionale Feature-Flags, z. B. { blog: true } oder { blog: { enabled: true } } */
+  features?: {
+    blog?: boolean | { enabled?: boolean };
+  };
+}
+
+export interface BlogFrontmatter {
+  title: string;
+  slug: string;
+  date: string;
+  coverImage: string;
+  excerpt: string;
+  draft: boolean;
+}
+
+export interface BlogPost extends BlogFrontmatter {
+  /** Repo-Pfad, z. B. "src/content/blog/mein-beitrag.md" */
+  path: string;
+  sha: string;
 }
 
 export interface Site {
