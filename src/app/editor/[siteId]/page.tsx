@@ -67,12 +67,13 @@ export default async function EditorPage({ params }: EditorPageProps) {
     const octokit = createOctokit();
     manifest = await getManifest(octokit, typedSite.repo_owner, typedSite.repo_name);
 
-    // Alle referenzierten Content-Dateien einmalig laden
+    // Alle referenzierten Content-Dateien einmalig laden – strikt nur .json,
+    // damit z. B. Markdown-Dateien aus src/content/blog/ niemals an JSON.parse gehen
     const filePaths = [
       ...new Set(
         manifest.sections.flatMap((s) => s.fields.map((f) => f.file))
       ),
-    ];
+    ].filter((f) => f.endsWith(".json"));
     const fileContents = new Map<string, Record<string, unknown>>();
     const failedFiles: string[] = [];
 

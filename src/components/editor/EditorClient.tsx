@@ -51,6 +51,42 @@ interface Toast {
   message: string;
 }
 
+interface PageGroup {
+  id: string;
+  label: string;
+  sections: ManifestSection[];
+}
+
+type DeployState = "idle" | "building" | "done";
+
+/** Bekannte Seiten-Präfixe (Sektions-ID/Titel oder Dateiname) -> Tab-Label */
+const PAGE_KEYWORDS: [RegExp, string][] = [
+  [/home|startseite|index/i, "Startseite"],
+  [/about|über|ueber/i, "Über uns"],
+  [/service|leistung/i, "Leistungen"],
+  [/contact|kontakt/i, "Kontakt"],
+  [/blog/i, "Blog"],
+  [/site|global|firma|footer|header|settings/i, "Firmendaten"],
+];
+
+/** Ermittelt die Seite einer Sektion: erst ID/Titel, sonst Dateipfad der Felder. */
+function detectPageLabel(section: ManifestSection): string {
+  const haystack = `${section.id} ${section.title}`;
+  for (const [pattern, label] of PAGE_KEYWORDS) {
+    if (pattern.test(haystack)) return label;
+  }
+  // Fallback: Seite aus dem file-Pfad ableiten (z. B. pages/home.json -> Startseite)
+  const file = section.fields[0]?.file ?? "";
+  const base = file.split("/").pop()?.replace(/\.json$/i, "") ?? "";
+  if (base) {
+    for (const [pattern, label] of PAGE_KEYWORDS) {
+      if (pattern.test(base)) return label;
+    }
+    return base.charAt(0).toUpperCase() + base.slice(1);
+  }
+  return "Weitere";
+}
+
 export function EditorClient({
   site,
   manifest,
@@ -62,6 +98,16 @@ export function EditorClient({
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const timersRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const pendingRef = useRef(0);
+  const deployTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Konkreter Origin der Vorschau-Website für postMessage (statt "*")
+  const previewOrigin = useMemo(() => {
+    try {
+      return new URL(site.preview_url).origin;
+    } catch {
+      return null;
+    }
+  }, [site.preview_url]);
 
   const [values, setValues] = useState<DraftMap>(initialValues);
   const [dirtyFields, setDirtyFields] = useState<Set<string>>(
@@ -77,6 +123,8 @@ export function EditorClient({
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [activeTab, setActiveTab] = useState<"content" | "blog">("content");
   const [searchQuery, setSearchQuery] = useState("");
+  const [activePageId, setActivePageId] = useState<string | null>(null);
+  const [deployState, setDeployState] = useState<DeployState>("idle");
 
   // Blog-Feature aktiviert? (features.blog === true oder features.blog.enabled === true)
   const blogEnabled = useMemo(() => {
@@ -127,9 +175,44 @@ export function EditorClient({
       .filter((s) => s.fields.length > 0);
   }, [sections, searchQuery]);
 
-  const expandAll = useCallback(() => {
-    setOpenSections(new Set(sections.map((s) => s.id)));
+  // Sektionen nach Seiten gruppieren (Startseite, Leistungen, Kontakt, Firmendaten …)
+  const pages = useMemo<PageGroup[]>(() => {
+    const map = new Map<string, PageGroup>();
+    for (const section of sections) {
+      const label = detectPageLabel(section);
+      const existing = map.get(label);
+      if (existing) {
+        existing.sections.push(section);
+      } else {
+        map.set(label, { id: label.toLowerCase(), label, sections: [section] });
+      }
+    }
+    return [...map.values()];
   }, [sections]);
+
+  const activePage = pages.find((p) => p.id === activePageId) ?? pages[0] ?? null;
+  const isSearching = searchQuery.trim() !== "";
+
+  // Bei aktiver Suche über alle Seiten hinweg anzeigen, sonst nur die aktive Seite
+  const visibleSections = useMemo<ManifestSection[]>(
+    () => (isSearching ? filteredSections : (activePage?.sections ?? [])),
+    [isSearching, filteredSections, activePage]
+  );
+
+  const selectPage = useCallback((page: PageGroup) => {
+    setActivePageId(page.id);
+    setSearchQuery("");
+    // Erste Sektion der gewählten Seite aufklappen
+    setOpenSections((prev) => {
+      const next = new Set(prev);
+      if (page.sections[0]) next.add(page.sections[0].id);
+      return next;
+    });
+  }, []);
+
+  const expandAll = useCallback(() => {
+    setOpenSections(new Set(visibleSections.map((s) => s.id)));
+  }, [visibleSections]);
 
   const collapseAll = useCallback(() => {
     setOpenSections(new Set());
@@ -152,6 +235,7 @@ export function EditorClient({
     const timers = timersRef.current;
     return () => {
       timers.forEach((t) => clearTimeout(t));
+      if (deployTimerRef.current) clearTimeout(deployTimerRef.current);
     };
   }, []);
 
@@ -194,11 +278,13 @@ export function EditorClient({
       setValues((prev) => ({ ...prev, [fieldId]: value }));
       setDirtyFields((prev) => new Set(prev).add(fieldId));
 
-      // a) Sofortiges Live-Update an die Vorschau
-      iframeRef.current?.contentWindow?.postMessage(
-        { type: "CMS_FIELD_UPDATE", field: fieldId, value },
-        "*"
-      );
+      // a) Sofortiges Live-Update an die Vorschau (nur an den konkreten Origin)
+      if (previewOrigin) {
+        iframeRef.current?.contentWindow?.postMessage(
+          { type: "CMS_FIELD_UPDATE", field: fieldId, value },
+          previewOrigin
+        );
+      }
 
       // b) Debounced Autosave (800ms)
       const existing = timersRef.current.get(fieldId);
@@ -212,7 +298,7 @@ export function EditorClient({
         }, 800)
       );
     },
-    [saveDraft]
+    [saveDraft, previewOrigin]
   );
 
   async function handlePublish() {
@@ -234,6 +320,16 @@ export function EditorClient({
       setStatus("live");
       // Verlaufs-Liste sofort neu laden lassen
       setHistoryRefresh((k) => k + 1);
+      // Deployment-Feedback: nach ca. 45 s (Vercel-Build) Box auf grün schalten
+      // und die Vorschau neu laden, damit das Live-Ergebnis sichtbar wird
+      if (deployTimerRef.current) clearTimeout(deployTimerRef.current);
+      setDeployState("building");
+      deployTimerRef.current = setTimeout(() => {
+        setDeployState("done");
+        if (iframeRef.current) {
+          iframeRef.current.src = iframeRef.current.src;
+        }
+      }, 45_000);
       pushToast(
         "success",
         body.message ?? "Änderungen wurden veröffentlicht. Die Website wird in wenigen Minuten aktualisiert."
@@ -294,6 +390,54 @@ export function EditorClient({
         {/* Linke Spalte: Formular */}
         <div className="w-full min-w-0 flex-1 overflow-y-auto border-r border-zinc-200 bg-white lg:w-[40%] lg:flex-none">
           <div className="mx-auto max-w-xl px-6 py-6">
+            {deployState !== "idle" && (
+              <div
+                className={`mb-6 rounded-xl border px-4 py-3 text-sm ${
+                  deployState === "building"
+                    ? "border-blue-200 bg-blue-50 text-blue-800"
+                    : "border-emerald-200 bg-emerald-50 text-emerald-800"
+                }`}
+              >
+                {deployState === "building" ? (
+                  <>
+                    <div className="flex items-start gap-2">
+                      <Rocket className="mt-0.5 h-4 w-4 shrink-0" />
+                      <p className="font-medium">
+                        🚀 Änderungen wurden übertragen! Vercel baut die Website
+                        live (Dauer: ca. 45 Sekunden) …
+                      </p>
+                    </div>
+                    <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-blue-200/70">
+                      <div className="cms-deploy-progress h-full rounded-full bg-blue-600" />
+                    </div>
+                    <style>{`
+                      @keyframes cms-deploy-progress {
+                        from { width: 0%; }
+                        to { width: 100%; }
+                      }
+                      .cms-deploy-progress {
+                        animation: cms-deploy-progress 45s linear forwards;
+                      }
+                    `}</style>
+                  </>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="h-4 w-4 shrink-0" />
+                    <p className="flex-1 font-medium">
+                      ✅ Website ist jetzt live aktualisiert!
+                    </p>
+                    <button
+                      onClick={() => setDeployState("idle")}
+                      className="opacity-60 transition hover:opacity-100"
+                      aria-label="Hinweis schließen"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {manifestError && (
               <div className="mb-6 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
                 <div className="flex items-start gap-2">
@@ -383,10 +527,32 @@ export function EditorClient({
                   </div>
                 )}
 
-                {filteredSections?.map((section) => {
+                {/* Seiten-Tabs: Sektionen nach Seite gruppieren (bei Suche ausgeblendet) */}
+                {!manifestError && !isSearching && pages.length > 1 && (
+                  <div className="mb-5 flex flex-wrap gap-2">
+                    {pages.map((page) => {
+                      const isActive = activePage?.id === page.id;
+                      return (
+                        <button
+                          key={page.id}
+                          type="button"
+                          onClick={() => selectPage(page)}
+                          className={`rounded-full px-4 py-1.5 text-sm font-medium transition ${
+                            isActive
+                              ? "bg-zinc-900 text-white shadow-sm"
+                              : "border border-zinc-300 bg-white text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
+                          }`}
+                        >
+                          {page.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {visibleSections.map((section) => {
                   // Bei aktiver Suche alle Treffer geöffnet anzeigen
-                  const isOpen =
-                    searchQuery.trim() !== "" || openSections.has(section.id);
+                  const isOpen = isSearching || openSections.has(section.id);
                   return (
                     <section
                       key={section?.id}
@@ -429,7 +595,7 @@ export function EditorClient({
                   );
                 })}
 
-                {!manifestError && searchQuery.trim() !== "" && filteredSections.length === 0 && (
+                {!manifestError && isSearching && visibleSections.length === 0 && (
                   <p className="py-6 text-center text-sm text-zinc-500">
                     Keine Felder gefunden für &bdquo;{searchQuery.trim()}&ldquo;.
                   </p>
@@ -551,14 +717,14 @@ function StatusBadge({
     return (
       <span className="flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
         <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-        Entwurf gesichert
+        Entwurf gesichert (Noch nicht live)
       </span>
     );
   }
   return (
-    <span className="flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">
-      <CheckCircle2 className="h-3.5 w-3.5" />
-      Alle Änderungen live
+    <span className="flex items-center gap-1.5 rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-600">
+      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+      Bereit – Keine ungespeicherten Änderungen
     </span>
   );
 }

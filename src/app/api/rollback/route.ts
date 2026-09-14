@@ -7,6 +7,11 @@ const COMMIT_MESSAGE = "cms: rollback to historical version";
 
 type Payload = Record<string, Record<string, unknown>>;
 
+/** Whitelist: Es dürfen nur JSON-Dateien unter src/content/ überschrieben werden. */
+function isAllowedFilePath(filePath: string): boolean {
+  return filePath.startsWith("src/content/") && filePath.endsWith(".json");
+}
+
 function isValidPayload(payload: unknown): payload is Payload {
   return (
     typeof payload === "object" &&
@@ -30,7 +35,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Nicht authentifiziert." }, { status: 401 });
     }
 
-    let body: { siteId?: string; historyId?: string; payload?: unknown };
+    let body: { siteId?: string; historyId?: string };
     try {
       body = await request.json();
     } catch {
@@ -40,6 +45,9 @@ export async function POST(request: Request) {
     const { siteId, historyId } = body;
     if (!siteId) {
       return NextResponse.json({ error: "siteId fehlt." }, { status: 400 });
+    }
+    if (!historyId) {
+      return NextResponse.json({ error: "historyId fehlt." }, { status: 400 });
     }
 
     // Zugriff prüfen
@@ -66,36 +74,36 @@ export async function POST(request: Request) {
 
     const typedSite = site as Site;
 
-    // Payload bestimmen: direkt mitgeschickt oder über historyId aus publish_history laden
-    let payload: unknown = body.payload ?? null;
+    // Payload ausschließlich serverseitig über historyId aus publish_history laden
+    const { data: entry, error: entryError } = await supabase
+      .from("publish_history")
+      .select("*")
+      .eq("id", historyId)
+      .eq("site_id", siteId)
+      .single();
 
-    if (!payload) {
-      if (!historyId) {
-        return NextResponse.json(
-          { error: "historyId oder payload fehlt." },
-          { status: 400 }
-        );
-      }
-
-      const { data: entry, error: entryError } = await supabase
-        .from("publish_history")
-        .select("*")
-        .eq("id", historyId)
-        .eq("site_id", siteId)
-        .single();
-
-      if (entryError || !entry) {
-        return NextResponse.json({ error: "Version nicht gefunden." }, { status: 404 });
-      }
-
-      payload = (entry as PublishHistoryEntry).payload;
+    if (entryError || !entry) {
+      return NextResponse.json({ error: "Version nicht gefunden." }, { status: 404 });
     }
+
+    const payload: unknown = (entry as PublishHistoryEntry).payload;
 
     if (!isValidPayload(payload)) {
       return NextResponse.json(
         {
           error:
             "Diese Version enthält keinen wiederherstellbaren Payload (erwartet: { dateipfad: { ... } }).",
+        },
+        { status: 400 }
+      );
+    }
+
+    // Pfad-Whitelist: nur JSON-Dateien unter src/content/ dürfen überschrieben werden
+    const forbiddenPaths = Object.keys(payload).filter((p) => !isAllowedFilePath(p));
+    if (forbiddenPaths.length > 0) {
+      return NextResponse.json(
+        {
+          error: `Der Payload enthält nicht erlaubte Dateipfade: ${forbiddenPaths.join(", ")}. Es dürfen nur .json-Dateien unter src/content/ wiederhergestellt werden.`,
         },
         { status: 400 }
       );

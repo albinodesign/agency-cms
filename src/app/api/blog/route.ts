@@ -8,6 +8,13 @@ import type { Octokit } from "@octokit/rest";
 
 const BLOG_DIR = "src/content/blog";
 
+/** Strikte Pfad-Whitelist: nur src/content/blog/<slug>.md mit [a-z0-9-] im Dateinamen. */
+const VALID_BLOG_PATH = /^src\/content\/blog\/[a-z0-9-]+\.md$/;
+
+function isValidBlogPath(path: string): boolean {
+  return !path.includes("..") && VALID_BLOG_PATH.test(path);
+}
+
 /** Session + Site-Zugriff prüfen, liefert die Site oder eine Fehler-Response. */
 async function authorize(siteId: string | null) {
   if (!siteId) {
@@ -132,7 +139,7 @@ export async function GET(request: Request) {
 
     // Einzelnen Beitrag inkl. Inhalt laden (für den Beitrags-Editor)
     if (path) {
-      if (!path.startsWith(`${BLOG_DIR}/`) || !path.endsWith(".md")) {
+      if (!isValidBlogPath(path)) {
         return NextResponse.json({ error: "Ungültiger Dateipfad." }, { status: 400 });
       }
       const { data } = await octokit.repos.getContent({
@@ -209,6 +216,11 @@ export async function POST(request: Request) {
   const markdown = matter.stringify(`\n${body.content ?? ""}\n`, frontmatter);
   const filePath = `${BLOG_DIR}/${slug}.md`;
 
+  // Defense in Depth: der erzeugte Pfad muss dem Blog-Pfad-Schema entsprechen
+  if (!isValidBlogPath(filePath)) {
+    return NextResponse.json({ error: "Ungültiger Dateipfad." }, { status: 400 });
+  }
+
   try {
     const octokit = createOctokit();
 
@@ -274,8 +286,8 @@ export async function DELETE(request: Request) {
     return NextResponse.json({ error: "path oder sha fehlt." }, { status: 400 });
   }
 
-  // Sicherheitscheck: nur Dateien im Blog-Ordner löschen
-  if (!path.startsWith(`${BLOG_DIR}/`) || !path.endsWith(".md")) {
+  // Sicherheitscheck: nur Dateien im Blog-Ordner löschen (strikt: kein "..", nur [a-z0-9-].md)
+  if (!isValidBlogPath(path)) {
     return NextResponse.json(
       { error: "Nur Markdown-Dateien im Blog-Ordner dürfen gelöscht werden." },
       { status: 400 }

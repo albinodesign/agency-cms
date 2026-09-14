@@ -114,6 +114,10 @@ export async function POST(request: Request) {
 
     // Dateien aus GitHub laden, aktualisieren und committen
     const committedFields: string[] = [];
+    // Primärschlüssel der tatsächlich publizierten Entwürfe: Beim Löschen werden
+    // nur exakt diese IDs entfernt, damit während des Publish-Vorgangs neu
+    // getippte Entwürfe niemals verloren gehen
+    const committedDraftIds: string[] = [];
     const payload: Record<string, Record<string, unknown>> = {};
     let lastCommitSha: string | null = null;
 
@@ -163,6 +167,7 @@ export async function POST(request: Request) {
       }
 
       committedFields.push(...fileDrafts.map((d) => d.field_id));
+      committedDraftIds.push(...fileDrafts.map((d) => d.id));
       // Vollständiges, aktualisiertes JSON-Objekt der Datei für den Verlauf merken
       payload[filePath] = json;
     }
@@ -190,12 +195,13 @@ export async function POST(request: Request) {
       `publish_history: Eintrag für Site ${siteId} gespeichert (Commit ${lastCommitSha ?? "unbekannt"}, ${committedFields.length} Feld(er))`
     );
 
-    // Publizierte Entwürfe löschen
+    // Publizierte Entwürfe löschen – nur exakt die zuvor geladenen und
+    // committeten Primärschlüssel (kein Datenverlust bei parallelen Änderungen)
     const { error: deleteError } = await supabase
       .from("drafts")
       .delete()
       .eq("site_id", siteId)
-      .in("field_id", committedFields);
+      .in("id", committedDraftIds);
 
     if (deleteError) {
       console.error("drafts delete fehlgeschlagen:", deleteError.message);

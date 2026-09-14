@@ -110,11 +110,17 @@ export function normalizeManifest(raw: unknown): CmsManifest {
 
   const sections = rawSections
     .filter((s) => typeof s === "object" && s !== null)
-    .map((s, index) => ({
-      id: typeof s.id === "string" ? s.id : `section-${index}`,
-      title: typeof s.title === "string" ? s.title : `Sektion ${index + 1}`,
-      fields: (Array.isArray(s.fields) ? s.fields : []).filter(isValidField),
-    }))
+    .map((s, index) => {
+      // Sektionsname tolerant ermitteln: title oder label, sonst id, sonst Fallback
+      const rawTitle = [s.title, (s as { label?: unknown }).label, s.id].find(
+        (v): v is string => typeof v === "string" && v.trim() !== ""
+      );
+      return {
+        id: typeof s.id === "string" ? s.id : `section-${index}`,
+        title: rawTitle ?? `Sektion ${index + 1}`,
+        fields: (Array.isArray(s.fields) ? s.fields : []).filter(isValidField),
+      };
+    })
     .filter((s) => s.fields.length > 0);
 
   const features = Array.isArray(raw)
