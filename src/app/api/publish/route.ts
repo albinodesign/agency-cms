@@ -122,6 +122,11 @@ export async function POST(request: Request) {
     let lastCommitSha: string | null = null;
 
     for (const [filePath, fileDrafts] of draftsByFile) {
+      // Ausschließlich JSON-Dateien verarbeiten (kein JSON.parse auf Markdown o. ä.)
+      if (!filePath.endsWith(".json")) {
+        skipped.push(...fileDrafts.map((d) => d.field_id));
+        continue;
+      }
       let json: Record<string, unknown>;
       let sha: string;
       try {

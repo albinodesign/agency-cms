@@ -1,4 +1,12 @@
-export type FieldType = "text" | "textarea" | "image";
+export type FieldType =
+  | "text"
+  | "textarea"
+  | "image"
+  | "number"
+  | "email"
+  | "phone"
+  | "url"
+  | "date";
 
 export interface ManifestField {
   /** Eindeutige Feld-ID, z. B. "hero.title" */
@@ -33,6 +41,8 @@ export interface BlogFrontmatter {
   slug: string;
   date: string;
   coverImage: string;
+  /** Alt-Text des Beitragsbilds (Fallback: Titel) */
+  coverImageAlt?: string;
   excerpt: string;
   draft: boolean;
 }

@@ -779,6 +779,17 @@ function FieldEditor({
         />
       )}
 
+      {["number", "email", "phone", "url", "date"].includes(field.type) && (
+        <input
+          type={field.type === "phone" ? "tel" : field.type}
+          value={value}
+          placeholder={field.placeholder}
+          maxLength={field.maxLength}
+          onChange={(e) => onChange(e.target.value)}
+          className={baseClass}
+        />
+      )}
+
       {field.type === "textarea" && (
         <textarea
           value={value}

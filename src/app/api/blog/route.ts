@@ -113,6 +113,7 @@ async function listBlogPosts(
             : file.name.replace(/\.md$/, ""),
         date: fm.date ? String(fm.date) : "",
         coverImage: typeof fm.coverImage === "string" ? fm.coverImage : "",
+        coverImageAlt: typeof fm.coverImageAlt === "string" ? fm.coverImageAlt : "",
         excerpt: typeof fm.excerpt === "string" ? fm.excerpt : "",
         draft: fm.draft === true,
       });
@@ -180,6 +181,7 @@ export async function POST(request: Request) {
       title?: string;
       date?: string;
       coverImage?: string;
+      coverImageAlt?: string;
       excerpt?: string;
       draft?: boolean;
     };
@@ -209,6 +211,7 @@ export async function POST(request: Request) {
     slug,
     date: fm.date || new Date().toISOString().slice(0, 10),
     coverImage: fm.coverImage ?? "",
+    coverImageAlt: fm.coverImageAlt || fm.title || "",
     excerpt: fm.excerpt ?? "",
     draft: fm.draft === true,
   };

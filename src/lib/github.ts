@@ -1,5 +1,5 @@
 import { Octokit } from "@octokit/rest";
-import type { CmsManifest, ManifestField, ManifestSection } from "@/types/cms";
+import type { CmsManifest, FieldType, ManifestField, ManifestSection } from "@/types/cms";
 
 export function createOctokit() {
   const token = process.env.GITHUB_TOKEN;
@@ -63,17 +63,54 @@ export async function getRepoFile(
   return { text, sha: file.sha };
 }
 
-function isValidField(field: unknown): field is ManifestField {
-  const f = field as ManifestField;
-  return (
-    typeof f === "object" &&
-    f !== null &&
-    typeof f.id === "string" &&
-    typeof f.label === "string" &&
-    ["text", "textarea", "image"].includes(f.type) &&
-    typeof f.file === "string" &&
-    typeof f.path === "string"
+/** Erlaubte Feldtypen; alles andere wird als "text" behandelt statt gelöscht. */
+const ALLOWED_FIELD_TYPES: FieldType[] = [
+  "text",
+  "textarea",
+  "image",
+  "number",
+  "email",
+  "phone",
+  "url",
+  "date",
+];
+
+function pickString(...values: unknown[]): string | undefined {
+  return values.find(
+    (v): v is string => typeof v === "string" && v.trim() !== ""
   );
+}
+
+/**
+ * Normalisiert ein Roh-Feld in ein ManifestField.
+ * Liefert null, wenn Pflichtangaben (id, file, path) fehlen.
+ * Unbekannte Typen werden als "text" übernommen, das Label fällt auf
+ * title bzw. id zurück.
+ */
+function normalizeField(field: unknown): ManifestField | null {
+  if (typeof field !== "object" || field === null) return null;
+  const f = field as Partial<ManifestField> & { title?: unknown };
+
+  if (
+    typeof f.id !== "string" ||
+    typeof f.file !== "string" ||
+    typeof f.path !== "string"
+  ) {
+    return null;
+  }
+
+  const type = ALLOWED_FIELD_TYPES.includes(f.type as FieldType)
+    ? (f.type as FieldType)
+    : "text";
+
+  return {
+    ...f,
+    id: f.id,
+    label: pickString(f.label, f.title, f.id) ?? f.id,
+    type,
+    file: f.file,
+    path: f.path,
+  };
 }
 
 /**
@@ -111,14 +148,19 @@ export function normalizeManifest(raw: unknown): CmsManifest {
   const sections = rawSections
     .filter((s) => typeof s === "object" && s !== null)
     .map((s, index) => {
-      // Sektionsname tolerant ermitteln: title oder label, sonst id, sonst Fallback
-      const rawTitle = [s.title, (s as { label?: unknown }).label, s.id].find(
-        (v): v is string => typeof v === "string" && v.trim() !== ""
-      );
+      const raw = s as ManifestSection & {
+        section?: unknown;
+        label?: unknown;
+        sectionLabel?: unknown;
+      };
       return {
-        id: typeof s.id === "string" ? s.id : `section-${index}`,
-        title: rawTitle ?? `Sektion ${index + 1}`,
-        fields: (Array.isArray(s.fields) ? s.fields : []).filter(isValidField),
+        id: pickString(raw.id, raw.section) ?? `section-${index}`,
+        title:
+          pickString(raw.label, raw.title, raw.sectionLabel, raw.id, raw.section) ??
+          `Sektion ${index + 1}`,
+        fields: (Array.isArray(s.fields) ? s.fields : [])
+          .map(normalizeField)
+          .filter((f): f is ManifestField => f !== null),
       };
     })
     .filter((s) => s.fields.length > 0);

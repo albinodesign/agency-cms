@@ -42,6 +42,7 @@ export function BlogEditorModal({
   const [slugEdited, setSlugEdited] = useState(post !== null);
   const [date, setDate] = useState(post?.date || todayIso());
   const [coverImage, setCoverImage] = useState(post?.coverImage ?? "");
+  const [coverImageAlt, setCoverImageAlt] = useState(post?.coverImageAlt ?? "");
   const [excerpt, setExcerpt] = useState(post?.excerpt ?? "");
   const [draft, setDraft] = useState(post?.draft ?? false);
   const [content, setContent] = useState(initialContent);
@@ -111,7 +112,7 @@ export function BlogEditorModal({
         body: JSON.stringify({
           siteId,
           slug: finalSlug,
-          frontmatter: { title: title.trim(), date, coverImage, excerpt, draft },
+          frontmatter: { title: title.trim(), date, coverImage, coverImageAlt, excerpt, draft },
           content,
         }),
       });
@@ -219,6 +220,19 @@ export function BlogEditorModal({
             onChange={setCoverImage}
             onError={onError}
           />
+
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-zinc-700">
+              Bild Alt-Text
+            </label>
+            <input
+              type="text"
+              value={coverImageAlt}
+              onChange={(e) => setCoverImageAlt(e.target.value)}
+              placeholder="Beschreibung des Beitragsbilds (sonst wird der Titel verwendet)"
+              className={inputClass}
+            />
+          </div>
 
           <div>
             <label className="mb-1.5 block text-sm font-medium text-zinc-700">
