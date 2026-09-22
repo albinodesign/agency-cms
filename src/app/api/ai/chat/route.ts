@@ -182,6 +182,26 @@ export async function POST(request: Request) {
   }
 
   const tools = {
+    projektUebersicht: tool({
+      description: "Liefert eine kompakte Liste aller Komponenten, Seiten und Inhaltsdateien im Website-Repository. Nutze dies ZUERST, um Dateipfade zu finden, bevor du Dateien liest.",
+      inputSchema: z.object({}),
+      execute: async () => {
+        try {
+          const { data } = await octo().git.getTree({
+            owner: site.repo_owner,
+            repo: site.repo_name,
+            tree_sha: "main",
+            recursive: "true",
+          });
+          const relevantFiles = (data.tree ?? [])
+            .map((item) => item.path ?? "")
+            .filter((p) => p.startsWith("src/") && (p.endsWith(".astro") || p.endsWith(".json") || p.endsWith(".md") || p.endsWith(".css")));
+          return { dateien: relevantFiles };
+        } catch (err) {
+          return { fehler: `Projektübersicht konnte nicht geladen werden: ${err instanceof Error ? err.message : "unbekannt"}` };
+        }
+      },
+    }),
     listeFelder: tool({
       description: "Listet alle bearbeitbaren Felder der Website (ID, Name, Typ).",
       inputSchema: z.object({}),

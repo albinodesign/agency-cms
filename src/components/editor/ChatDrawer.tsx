@@ -8,6 +8,7 @@ import type { DraftMap, ManifestField } from "@/types/cms";
 
 /** Deutsche Namen für das, was die KI gerade tut. */
 const TOOL_LABELS: Record<string, string> = {
+  projektUebersicht: "schaut sich das Projekt an …",
   listeFelder: "schaut sich die Felder an …",
   leseDatei: "liest eine Datei …",
   schreibeInhalt: "ändert einen Inhalt …",

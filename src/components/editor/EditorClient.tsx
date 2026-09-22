@@ -378,6 +378,24 @@ export function EditorClient({
     setStatus("saved");
   }, []);
 
+  // KI-Entwürfe wurden serverseitig bereits in drafts geupsertet.
+  // Hier nur lokalen State & Live-Iframe aktualisieren (kein erneuter DB-Timer!).
+  const handleAiFieldApplied = useCallback(
+    (fieldId: string, value: string) => {
+      setValues((prev) => ({ ...prev, [fieldId]: value }));
+      setDirtyFields((prev) => new Set(prev).add(fieldId));
+      setStatus("saved");
+
+      if (previewOrigin) {
+        iframeRef.current?.contentWindow?.postMessage(
+          { type: "CMS_FIELD_UPDATE", field: fieldId, value },
+          previewOrigin
+        );
+      }
+    },
+    [previewOrigin]
+  );
+
   /** Meldet der Vorschau ob Klicks Felder suchen (Finden) oder normal funktionieren (Surfen). */
   const sendSelectMode = useCallback(
     (enabled: boolean) => {
@@ -881,7 +899,7 @@ export function EditorClient({
           values={values}
           open={chatOpen}
           onClose={() => setChatOpen(false)}
-          onFieldApplied={handleChange}
+          onFieldApplied={handleAiFieldApplied}
           onDraftTouched={touchDraft}
           onError={pushErrorToast}
           onSuccess={(msg) => pushToast("success", msg)}

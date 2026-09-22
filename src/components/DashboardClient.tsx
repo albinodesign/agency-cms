@@ -11,16 +11,23 @@ interface DashboardClientProps {
   initialSites: Site[];
   isAdmin: boolean;
   loadError: string | null;
+  usageStats?: Record<string, { messages: number; costEuro: number }>;
 }
 
 export function DashboardClient({
   initialSites,
   isAdmin,
   loadError,
+  usageStats,
 }: DashboardClientProps) {
   const [sites, setSites] = useState<Site[]>(initialSites);
   const [modalOpen, setModalOpen] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  // Monatsname großgeschrieben für die Verbrauchs-Anzeige (z. B. "März")
+  const currentMonthName = (() => {
+    const name = new Date().toLocaleDateString("de-DE", { month: "long" });
+    return name.charAt(0).toUpperCase() + name.slice(1);
+  })();
 
   /** KI-Chat pro Website an-/ausschalten (nur Admins). */
   async function toggleAi(site: Site) {
@@ -137,6 +144,14 @@ export function DashboardClient({
                     />
                   </span>
                 </button>
+              )}
+              {isAdmin && site.ai_enabled && (
+                <div className="mt-3 flex items-center justify-between rounded-lg border border-violet-100 bg-violet-50/70 px-3 py-1.5 text-xs">
+                  <span className="font-medium text-violet-700">Verbrauch ({currentMonthName}):</span>
+                  <span className="font-semibold text-violet-950">
+                    {usageStats?.[site.id]?.messages ?? 0} Prompts · {(usageStats?.[site.id]?.costEuro ?? 0).toFixed(2).replace(".", ",")} €
+                  </span>
+                </div>
               )}
               <Link
                 href={`/editor/${site.id}`}

@@ -25,8 +25,10 @@ export default async function DashboardPage() {
     .map((row) => row.sites as unknown as Site | null)
     .filter((s): s is Site => s !== null);
 
-  // Admin-Check: steht der Nutzer in der Tabelle "admins"?
+  // Admin-Check und KI-Verbrauchsstatistik für den aktuellen Monat laden
   let isAdmin = false;
+  const usageStats: Record<string, { messages: number; costEuro: number }> = {};
+
   try {
     const adminClient = createAdminClient();
     const { data: adminRow } = await adminClient
@@ -35,8 +37,25 @@ export default async function DashboardPage() {
       .eq("user_id", user.id)
       .maybeSingle();
     isAdmin = adminRow !== null;
+
+    if (isAdmin) {
+      const currentMonth = new Date().toISOString().slice(0, 7);
+      const { data: usageRows } = await adminClient
+        .from("ai_usage")
+        .select("site_id, messages, prompt_tokens, completion_tokens")
+        .eq("month", currentMonth);
+
+      const { calculateCostEuro } = await import("@/lib/ai");
+
+      (usageRows ?? []).forEach((row) => {
+        const cost = calculateCostEuro(row.prompt_tokens ?? 0, row.completion_tokens ?? 0);
+        usageStats[row.site_id] = {
+          messages: row.messages ?? 0,
+          costEuro: cost,
+        };
+      });
+    }
   } catch {
-    // Ohne Service-Role-Key keine Admin-Prüfung möglich -> normale Ansicht
     isAdmin = false;
   }
 
@@ -45,6 +64,7 @@ export default async function DashboardPage() {
       initialSites={sites}
       isAdmin={isAdmin}
       loadError={error?.message ?? null}
+      usageStats={usageStats}
     />
   );
 }
