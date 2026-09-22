@@ -98,7 +98,6 @@ export function EditorClient({
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const timersRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const pendingRef = useRef(0);
-  const deployTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Konkreter Origin der Vorschau-Website für postMessage (statt "*")
   const previewOrigin = useMemo(() => {
@@ -125,6 +124,14 @@ export function EditorClient({
   const [searchQuery, setSearchQuery] = useState("");
   const [activePageId, setActivePageId] = useState<string | null>(null);
   const [deployState, setDeployState] = useState<DeployState>("idle");
+  // Handy-Ansicht: zwischen Formular und Vorschau umschalten (am PC immer Split-Screen)
+  const [mobileView, setMobileView] = useState<"form" | "preview">("form");
+  // Klick-Modus: true = Klick in der Vorschau sucht das Feld ("Finden"),
+  // false = Klicks gehen normal auf Links ("Surfen")
+  const [selectMode, setSelectMode] = useState(true);
+  // Zuletzt angeklicktes Feld (wird kurz gelb markiert)
+  const [selectedFieldId, setSelectedFieldId] = useState<string | null>(null);
+  const selectFlashRef = useRef<number | null>(null);
 
   // Blog-Feature aktiviert? (features.blog === true oder features.blog.enabled === true)
   const blogEnabled = useMemo(() => {
@@ -193,6 +200,12 @@ export function EditorClient({
   const activePage = pages.find((p) => p.id === activePageId) ?? pages[0] ?? null;
   const isSearching = searchQuery.trim() !== "";
 
+  // Warnung bei überladenen Manifesten: mehr als 80 Felder überfordern Kunden
+  const totalFields = useMemo(
+    () => sections.reduce((sum, s) => sum + (s.fields?.length ?? 0), 0),
+    [sections]
+  );
+
   // Bei aktiver Suche über alle Seiten hinweg anzeigen, sonst nur die aktive Seite
   const visibleSections = useMemo<ManifestSection[]>(
     () => (isSearching ? filteredSections : (activePage?.sections ?? [])),
@@ -235,7 +248,7 @@ export function EditorClient({
     const timers = timersRef.current;
     return () => {
       timers.forEach((t) => clearTimeout(t));
-      if (deployTimerRef.current) clearTimeout(deployTimerRef.current);
+      if (selectFlashRef.current) window.clearTimeout(selectFlashRef.current);
     };
   }, []);
 
@@ -320,19 +333,13 @@ export function EditorClient({
       setStatus("live");
       // Verlaufs-Liste sofort neu laden lassen
       setHistoryRefresh((k) => k + 1);
-      // Deployment-Feedback: nach ca. 45 s (Vercel-Build) Box auf grün schalten
-      // und die Vorschau neu laden, damit das Live-Ergebnis sichtbar wird
-      if (deployTimerRef.current) clearTimeout(deployTimerRef.current);
+      // Ehrlicher Hinweis statt Fake-Balken: Die Daten sind bei GitHub,
+      // Vercel baut jetzt im Hintergrund (Dauer schwankt: ca. 1-2 Minuten).
+      // Der Kunde lädt die Vorschau selbst neu, wenn er soweit ist.
       setDeployState("building");
-      deployTimerRef.current = setTimeout(() => {
-        setDeployState("done");
-        if (iframeRef.current) {
-          iframeRef.current.src = iframeRef.current.src;
-        }
-      }, 45_000);
       pushToast(
         "success",
-        body.message ?? "Änderungen wurden veröffentlicht. Die Website wird in wenigen Minuten aktualisiert."
+        body.message ?? "Änderungen wurden übertragen. Vercel baut die Website jetzt im Hintergrund."
       );
     } catch {
       pushToast("error", "Server nicht erreichbar. Bitte später erneut versuchen.");
@@ -342,6 +349,90 @@ export function EditorClient({
   }
 
   const hasDrafts = dirtyFields.size > 0;
+
+  /** Lädt die Vorschau neu (z. B. wenn der Vercel-Bau fertig ist). */
+  const reloadPreview = useCallback(() => {
+    if (iframeRef.current) {
+      iframeRef.current.src = iframeRef.current.src;
+    }
+    setDeployState("done");
+  }, []);
+
+  /** Öffnet die echte Live-Website in einem neuen Tab. */
+  const openLiveSite = useCallback(() => {
+    window.open(site.preview_url, "_blank", "noopener");
+  }, [site.preview_url]);
+
+  /** Meldet der Vorschau ob Klicks Felder suchen (Finden) oder normal funktionieren (Surfen). */
+  const sendSelectMode = useCallback(
+    (enabled: boolean) => {
+      if (previewOrigin) {
+        iframeRef.current?.contentWindow?.postMessage(
+          { type: "CMS_SELECT_MODE", enabled },
+          previewOrigin
+        );
+      }
+    },
+    [previewOrigin]
+  );
+
+  const toggleSelectMode = useCallback(
+    (enabled: boolean) => {
+      setSelectMode(enabled);
+      sendSelectMode(enabled);
+    },
+    [sendSelectMode]
+  );
+
+  // Hört auf Klicks aus der Vorschau: Die Website schickt CMS_FIELD_SELECT
+  // mit der Feld-ID, das CMS springt dann zum passenden Formularfeld.
+  useEffect(() => {
+    function onPreviewMessage(event: MessageEvent) {
+      // Sicherheitscheck: nur Nachrichten aus der eigenen Vorschau annehmen
+      if (previewOrigin && event.origin !== previewOrigin) return;
+      const data = event.data as { type?: unknown; field?: unknown } | null;
+      if (!data || data.type !== "CMS_FIELD_SELECT" || typeof data.field !== "string") {
+        return;
+      }
+      const fieldId = data.field;
+
+      // Feld im Manifest suchen (Seite + Sektion merken)
+      let foundSection: ManifestSection | null = null;
+      let foundPage: PageGroup | null = null;
+      for (const page of pages) {
+        for (const section of page.sections) {
+          if ((section.fields ?? []).some((f) => f.id === fieldId)) {
+            foundSection = section;
+            foundPage = page;
+            break;
+          }
+        }
+        if (foundSection) break;
+      }
+      if (!foundSection || !foundPage) {
+        pushToast("error", `Dieses Element ("${fieldId}") gibt es im Formular nicht.`);
+        return;
+      }
+
+      // Formular an die richtige Stelle bringen: Reiter, Seite, aufklappen …
+      setActiveTab("content");
+      setSearchQuery("");
+      setActivePageId(foundPage.id);
+      const sectionId = foundSection.id;
+      setOpenSections((prev) => new Set(prev).add(sectionId));
+      // … dann hinscrollen und kurz gelb markieren
+      window.setTimeout(() => {
+        document
+          .getElementById(`cms-field-${fieldId}`)
+          ?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 80);
+      setSelectedFieldId(fieldId);
+      if (selectFlashRef.current) window.clearTimeout(selectFlashRef.current);
+      selectFlashRef.current = window.setTimeout(() => setSelectedFieldId(null), 2200);
+    }
+    window.addEventListener("message", onPreviewMessage);
+    return () => window.removeEventListener("message", onPreviewMessage);
+  }, [previewOrigin, pages, pushToast]);
 
   return (
     <div className="flex h-screen flex-col bg-zinc-100">
@@ -385,10 +476,40 @@ export function EditorClient({
         </div>
       </header>
 
+      {/* Handy-Umschalter: Bearbeiten <-> Vorschau (am PC immer beides nebeneinander) */}
+      <div className="flex gap-1 border-b border-zinc-200 bg-white p-2 lg:hidden">
+        <button
+          onClick={() => setMobileView("form")}
+          className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition ${
+            mobileView === "form"
+              ? "bg-zinc-900 text-white"
+              : "text-zinc-600 hover:bg-zinc-100"
+          }`}
+        >
+          <FileText className="h-4 w-4" />
+          Bearbeiten
+        </button>
+        <button
+          onClick={() => setMobileView("preview")}
+          className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition ${
+            mobileView === "preview"
+              ? "bg-zinc-900 text-white"
+              : "text-zinc-600 hover:bg-zinc-100"
+          }`}
+        >
+          <Monitor className="h-4 w-4" />
+          Vorschau
+        </button>
+      </div>
+
       {/* Split-Screen */}
       <div className="flex min-h-0 flex-1">
         {/* Linke Spalte: Formular */}
-        <div className="w-full min-w-0 flex-1 overflow-y-auto border-r border-zinc-200 bg-white lg:w-[40%] lg:flex-none">
+        <div
+          className={`w-full min-w-0 flex-1 overflow-y-auto border-r border-zinc-200 bg-white lg:block lg:w-[40%] lg:flex-none ${
+            mobileView === "form" ? "block" : "hidden"
+          }`}
+        >
           <div className="mx-auto max-w-xl px-6 py-6">
             {deployState !== "idle" && (
               <div
@@ -399,32 +520,45 @@ export function EditorClient({
                 }`}
               >
                 {deployState === "building" ? (
-                  <>
-                    <div className="flex items-start gap-2">
-                      <Rocket className="mt-0.5 h-4 w-4 shrink-0" />
+                  <div className="flex items-start gap-2">
+                    <Rocket className="mt-0.5 h-4 w-4 shrink-0" />
+                    <div className="flex-1">
                       <p className="font-medium">
-                        🚀 Änderungen wurden übertragen! Vercel baut die Website
-                        live (Dauer: ca. 45 Sekunden) …
+                        Übertragen! Vercel baut die Website gerade neu – das
+                        dauert meist 1–2 Minuten.
                       </p>
+                      <p className="mt-1 text-blue-700/80">
+                        Die Vorschau hier zeigt noch den alten Stand, bis du sie
+                        neu lädst.
+                      </p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          onClick={reloadPreview}
+                          className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-500"
+                        >
+                          Vorschau neu laden
+                        </button>
+                        <button
+                          onClick={openLiveSite}
+                          className="rounded-lg border border-blue-300 bg-white px-3 py-1.5 text-xs font-semibold text-blue-800 transition hover:bg-blue-100"
+                        >
+                          Live-Website öffnen
+                        </button>
+                      </div>
                     </div>
-                    <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-blue-200/70">
-                      <div className="cms-deploy-progress h-full rounded-full bg-blue-600" />
-                    </div>
-                    <style>{`
-                      @keyframes cms-deploy-progress {
-                        from { width: 0%; }
-                        to { width: 100%; }
-                      }
-                      .cms-deploy-progress {
-                        animation: cms-deploy-progress 45s linear forwards;
-                      }
-                    `}</style>
-                  </>
+                    <button
+                      onClick={() => setDeployState("idle")}
+                      className="opacity-60 transition hover:opacity-100"
+                      aria-label="Hinweis schließen"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
                 ) : (
                   <div className="flex items-center gap-2">
                     <CheckCircle2 className="h-4 w-4 shrink-0" />
                     <p className="flex-1 font-medium">
-                      ✅ Website ist jetzt live aktualisiert!
+                      Vorschau wurde neu geladen.
                     </p>
                     <button
                       onClick={() => setDeployState("idle")}
@@ -455,6 +589,20 @@ export function EditorClient({
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                   <p className="break-words">{contentWarning}</p>
+                </div>
+              </div>
+            )}
+
+            {!manifestError && totalFields > 80 && (
+              <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <p>
+                    Diese Website hat sehr viele Felder ({totalFields}). Wenn
+                    Kunden sich beschweren dass alles unübersichtlich ist, frage
+                    deine Agentur ob wirklich alle Felder nötig sind – weniger
+                    ist mehr.
+                  </p>
                 </div>
               </div>
             )}
@@ -587,6 +735,7 @@ export function EditorClient({
                               siteId={site.id}
                               onChange={(v) => handleChange(field.id, v)}
                               onError={pushErrorToast}
+                              selected={selectedFieldId === field.id}
                             />
                           ))}
                         </div>
@@ -611,9 +760,39 @@ export function EditorClient({
           </div>
         </div>
 
-        {/* Rechte Spalte: Vorschau */}
-        <div className="hidden min-w-0 flex-1 flex-col lg:flex">
-          <div className="flex items-center justify-end gap-2 border-b border-zinc-200 bg-zinc-50 px-4 py-2">
+        {/* Rechte Spalte: Vorschau (am Handy nur wenn "Vorschau" gewählt) */}
+        <div
+          className={`min-w-0 flex-1 flex-col lg:flex ${
+            mobileView === "preview" ? "flex" : "hidden"
+          }`}
+        >
+          <div className="flex items-center justify-between gap-2 border-b border-zinc-200 bg-zinc-50 px-4 py-2">
+            {/* Finden = Klick sucht das Feld, Surfen = Klicks gehen normal auf Links */}
+            <div className="flex gap-1 rounded-lg bg-zinc-200/70 p-0.5">
+              <button
+                onClick={() => toggleSelectMode(true)}
+                title="Klick auf die Website springt zum passenden Feld"
+                className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
+                  selectMode
+                    ? "bg-zinc-900 text-white shadow-sm"
+                    : "text-zinc-600 hover:text-zinc-900"
+                }`}
+              >
+                Finden
+              </button>
+              <button
+                onClick={() => toggleSelectMode(false)}
+                title="Vorschau normal bedienen (Links anklickbar)"
+                className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
+                  !selectMode
+                    ? "bg-zinc-900 text-white shadow-sm"
+                    : "text-zinc-600 hover:text-zinc-900"
+                }`}
+              >
+                Surfen
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
             <button
               onClick={() => setViewport("desktop")}
               className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition ${
@@ -636,6 +815,7 @@ export function EditorClient({
               <Smartphone className="h-3.5 w-3.5" />
               Mobil
             </button>
+            </div>
           </div>
           <div className="flex min-h-0 flex-1 justify-center overflow-hidden bg-zinc-200/60 p-4">
             <div
@@ -650,6 +830,9 @@ export function EditorClient({
                 src={site.preview_url}
                 title={`Vorschau: ${site.name}`}
                 className="h-full w-full"
+                // Nach jedem (Neu-)Laden der Vorschau den Klick-Modus erneut melden,
+                // weil die Website beim Laden auf "Finden" zurücksetzt
+                onLoad={() => sendSelectMode(selectMode)}
               />
             </div>
           </div>
@@ -735,12 +918,15 @@ function FieldEditor({
   siteId,
   onChange,
   onError,
+  selected,
 }: {
   field: ManifestField;
   value: string;
   siteId: string;
   onChange: (value: string) => void;
   onError: (message: string) => void;
+  /** true wenn das Feld gerade per Klick in der Vorschau ausgewählt wurde */
+  selected: boolean;
 }) {
   const baseClass =
     "w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10";
@@ -750,64 +936,70 @@ function FieldEditor({
     : `${value.length} Zeichen`;
   const counterTooLong = field.maxLength != null && value.length > field.maxLength;
 
-  if (field.type === "image") {
-    return (
-      <ImageField
-        field={field}
-        value={value}
-        siteId={siteId}
-        onChange={onChange}
-        onError={onError}
-      />
-    );
-  }
-
+  // Anker-ID für "Klick in Vorschau springt hierher" + kurze Gelb-Markierung
   return (
-    <div>
-      <label className="mb-1.5 block text-sm font-medium text-zinc-700">
-        {field.label}
-      </label>
-
-      {field.type === "text" && (
-        <input
-          type="text"
+    <div
+      id={`cms-field-${field.id}`}
+      className={`scroll-mt-4 rounded-xl transition ${
+        selected ? "bg-blue-50 p-3 ring-2 ring-blue-600" : ""
+      }`}
+    >
+      {field.type === "image" ? (
+        <ImageField
+          field={field}
           value={value}
-          placeholder={field.placeholder}
-          maxLength={field.maxLength}
-          onChange={(e) => onChange(e.target.value)}
-          className={baseClass}
+          siteId={siteId}
+          onChange={onChange}
+          onError={onError}
         />
-      )}
+      ) : (
+        <div>
+          <label className="mb-1.5 block text-sm font-medium text-zinc-700">
+            {field.label}
+          </label>
 
-      {["number", "email", "phone", "url", "date"].includes(field.type) && (
-        <input
-          type={field.type === "phone" ? "tel" : field.type}
-          value={value}
-          placeholder={field.placeholder}
-          maxLength={field.maxLength}
-          onChange={(e) => onChange(e.target.value)}
-          className={baseClass}
-        />
-      )}
+          {field.type === "text" && (
+            <input
+              type="text"
+              value={value}
+              placeholder={field.placeholder}
+              maxLength={field.maxLength}
+              onChange={(e) => onChange(e.target.value)}
+              className={baseClass}
+            />
+          )}
 
-      {field.type === "textarea" && (
-        <textarea
-          value={value}
-          placeholder={field.placeholder}
-          maxLength={field.maxLength}
-          onChange={(e) => onChange(e.target.value)}
-          rows={4}
-          className={`${baseClass} resize-y`}
-        />
-      )}
+          {["number", "email", "phone", "url", "date"].includes(field.type) && (
+            <input
+              type={field.type === "phone" ? "tel" : field.type}
+              value={value}
+              placeholder={field.placeholder}
+              maxLength={field.maxLength}
+              onChange={(e) => onChange(e.target.value)}
+              className={baseClass}
+            />
+          )}
 
-      <p
-        className={`mt-1 text-right text-xs ${
-          counterTooLong ? "font-medium text-red-600" : "text-zinc-400"
-        }`}
-      >
-        {counter}
-      </p>
+          {field.type === "textarea" && (
+            <textarea
+              value={value}
+              placeholder={field.placeholder}
+              maxLength={field.maxLength}
+              onChange={(e) => onChange(e.target.value)}
+              rows={4}
+              className={`${baseClass} resize-y`}
+            />
+          )}
+
+          <p
+            className={`mt-1 text-right text-xs ${
+              counterTooLong ? "font-medium text-red-600" : "text-zinc-400"
+            }`}
+          >
+            {counter}
+          </p>
+        </div>
+      )}
     </div>
   );
 }

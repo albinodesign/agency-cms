@@ -146,24 +146,44 @@ export function HistoryDrawer({
           )}
 
           <ul className="space-y-3">
-            {entries.map((entry) => (
+            {entries.map((entry) => {
+              const files = Object.keys(entry.payload ?? {});
+              const note = entry.note ?? null;
+              return (
               <li
                 key={entry.id}
                 className="rounded-xl border border-zinc-200 bg-zinc-50/50 p-4"
               >
-                <p className="text-sm font-medium text-zinc-900">
-                  {formatDate(entry.created_at)}
-                </p>
-                <p className="mt-0.5 text-xs text-zinc-500">
-                  {entry.published_by
-                    ? `Veröffentlicht von ${entry.published_by.slice(0, 8)}…`
-                    : "Veröffentlicht von unbekannt"}
-                  {entry.commit_sha && (
-                    <> · Commit <code>{entry.commit_sha.slice(0, 7)}</code></>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-medium text-zinc-900">
+                    {formatDate(entry.created_at)}
+                  </p>
+                  {note && (
+                    <span className="rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700">
+                      {note === "Rollback" ? "Zurückgesetzt" : note}
+                    </span>
                   )}
-                  {" · "}
-                  {Object.keys(entry.payload ?? {}).length} Datei(en)
+                </div>
+                <p className="mt-0.5 text-xs text-zinc-500">
+                  {entry.commit_sha && (
+                    <>Commit <code>{entry.commit_sha.slice(0, 7)}</code>{" · "}</>
+                  )}
+                  {files.length} Datei(en)
                 </p>
+                {files.length > 0 && (
+                  <ul className="mt-2 space-y-0.5">
+                    {files.slice(0, 5).map((f) => (
+                      <li key={f} className="truncate font-mono text-[11px] text-zinc-400">
+                        {f}
+                      </li>
+                    ))}
+                    {files.length > 5 && (
+                      <li className="text-[11px] text-zinc-400">
+                        + {files.length - 5} weitere …
+                      </li>
+                    )}
+                  </ul>
+                )}
                 <button
                   onClick={() => handleRestore(entry)}
                   disabled={restoringId !== null}
@@ -177,12 +197,13 @@ export function HistoryDrawer({
                   ) : (
                     <>
                       <RotateCcw className="h-3.5 w-3.5" />
-                      Wiederherstellen
+                      Diese Version wiederherstellen
                     </>
                   )}
                 </button>
               </li>
-            ))}
+              );
+            })}
           </ul>
         </div>
       </aside>

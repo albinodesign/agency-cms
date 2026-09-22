@@ -2,9 +2,64 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createOctokit, getManifest, getRepoFile } from "@/lib/github";
 import { setByPath } from "@/lib/json-path";
-import type { Draft, Site } from "@/types/cms";
+import type { Draft, FieldType, Site } from "@/types/cms";
 
 const COMMIT_MESSAGE = "cms: update content by client";
+
+/**
+ * Prüft einen Entwurfswert gegen den Feldtyp aus dem Manifest.
+ * Liefert null wenn ok, sonst eine deutsche Fehlermeldung für den Kunden.
+ * Leere Werte sind erlaubt (Feld leeren) – Pflichtfelder kennt das Manifest nicht.
+ */
+function validateDraftValue(
+  type: FieldType,
+  value: string,
+  maxLength?: number
+): string | null {
+  if (maxLength != null && value.length > maxLength) {
+    return `Text ist zu lang (${value.length} von max. ${maxLength} Zeichen).`;
+  }
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  switch (type) {
+    case "number":
+      if (!/^[-+]?\d+([.,]\d+)?$/.test(trimmed)) {
+        return `"${value}" ist keine gültige Zahl (erlaubt z. B. "42" oder "19,90").`;
+      }
+      return null;
+    case "email":
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(trimmed)) {
+        return `"${value}" ist keine gültige E-Mail-Adresse.`;
+      }
+      return null;
+    case "url":
+    case "image":
+      try {
+        const url = new URL(trimmed);
+        if (url.protocol !== "http:" && url.protocol !== "https:") {
+          return `"${value}" muss mit http:// oder https:// beginnen (oder als Bild aus der Galerie hochgeladen werden).`;
+        }
+      } catch {
+        // Relative Pfade wie "/bilder/foto.jpg" gelten lassen
+        if (!trimmed.startsWith("/")) {
+          return `"${value}" ist keine gültige Internetadresse.`;
+        }
+      }
+      return null;
+    case "phone":
+      if (!/^[+()\d][\d\s/().-]{4,}$/.test(trimmed)) {
+        return `"${value}" sieht nicht wie eine Telefonnummer aus.`;
+      }
+      return null;
+    case "date":
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed) || Number.isNaN(Date.parse(trimmed))) {
+        return `"${value}" ist kein gültiges Datum (Format: JJJJ-MM-TT).`;
+      }
+      return null;
+    default:
+      return null;
+  }
+}
 
 export async function POST(request: Request) {
   try {
@@ -121,18 +176,21 @@ export async function POST(request: Request) {
     const payload: Record<string, Record<string, unknown>> = {};
     let lastCommitSha: string | null = null;
 
-    for (const [filePath, fileDrafts] of draftsByFile) {
+    // Phase 1: ALLE Dateien vorab laden + ALLE Werte prüfen.
+    // Erst wenn alles ok ist, wird überhaupt etwas committet.
+    // So gibt es keinen halben Live-Stand mehr (Hälfte neu, Hälfte alt).
+    const fileJson = new Map<string, { json: Record<string, unknown>; sha: string }>();
+    for (const [filePath] of draftsByFile) {
       // Ausschließlich JSON-Dateien verarbeiten (kein JSON.parse auf Markdown o. ä.)
       if (!filePath.endsWith(".json")) {
-        skipped.push(...fileDrafts.map((d) => d.field_id));
         continue;
       }
-      let json: Record<string, unknown>;
-      let sha: string;
       try {
         const file = await getRepoFile(octokit, typedSite.repo_owner, typedSite.repo_name, filePath);
-        sha = file.sha;
-        json = JSON.parse(file.text) as Record<string, unknown>;
+        fileJson.set(filePath, {
+          json: JSON.parse(file.text) as Record<string, unknown>,
+          sha: file.sha,
+        });
       } catch (err) {
         return NextResponse.json(
           {
@@ -143,10 +201,50 @@ export async function POST(request: Request) {
           { status: 502 }
         );
       }
+    }
+
+    // Alle Entwurfswerte gegen ihren Feldtyp prüfen, bevor irgendwas live geht
+    const validationErrors: string[] = [];
+    for (const [filePath, fileDrafts] of draftsByFile) {
+      if (!filePath.endsWith(".json")) {
+        skipped.push(...fileDrafts.map((d) => d.field_id));
+        continue;
+      }
+      for (const draft of fileDrafts) {
+        const field = fieldMap.get(draft.field_id)!;
+        const problem = validateDraftValue(field.type, draft.value, field.maxLength);
+        if (problem) {
+          validationErrors.push(`${field.label}: ${problem}`);
+        }
+      }
+    }
+    if (validationErrors.length > 0) {
+      return NextResponse.json(
+        {
+          error: `Bitte korrigiere zuerst diese Felder (es wurde nichts veröffentlicht):\n- ${validationErrors.join("\n- ")}`,
+        },
+        { status: 400 }
+      );
+    }
+
+    // Phase 2: jetzt erst schreiben + committen (alles wurde oben geprüft)
+    for (const [filePath, fileDrafts] of draftsByFile) {
+      if (!filePath.endsWith(".json")) {
+        continue;
+      }
+      const loaded = fileJson.get(filePath);
+      if (!loaded) continue;
+      const { json, sha } = loaded;
 
       for (const draft of fileDrafts) {
         const field = fieldMap.get(draft.field_id)!;
-        setByPath(json, field.path, draft.value);
+        // Zahlen als echte Zahlen speichern (nicht als Text), sonst meckert
+        // die strenge Prüfung auf der Website und der Bau schlägt fehl
+        let stored: unknown = draft.value;
+        if (field.type === "number" && draft.value.trim() !== "") {
+          stored = Number(draft.value.trim().replace(",", "."));
+        }
+        setByPath(json, field.path, stored);
       }
 
       try {

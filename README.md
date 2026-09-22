@@ -138,18 +138,77 @@ Artikel werden als Markdown-Dateien mit Frontmatter in `src/content/blog/` des W
 
 ## Live-Vorschau auf der Astro-Website
 
-Damit Eingaben sofort im Iframe sichtbar werden, muss die Website auf `postMessage`-Events hören:
+Damit Eingaben sofort im Iframe sichtbar werden UND Klicks auf der Website
+zum passenden Feld im CMS springen ("Finden"-Modus), muss die Website diese
+Brücke im `<head>` des Hauptlayouts einbinden. Sie läuft nur im CMS-Iframe,
+nie auf der echten Live-Seite (`window.self !== window.top`):
 
-```js
-window.addEventListener("message", (event) => {
-  const { type, field, value } = event.data ?? {};
-  if (type !== "CMS_FIELD_UPDATE") return;
-  document.querySelectorAll(`[data-cms-field="${field}"]`).forEach((el) => {
-    if (el.tagName === "IMG") el.src = value;
-    else el.textContent = value;
-  });
-});
+```html
+<script is:inline>
+  if (window.self !== window.top) {
+    // true = Klick sucht das Feld im CMS ("Finden"), false = normale Links ("Surfen")
+    let selectMode = true;
+
+    // Richtung 1: CMS -> Website (Live-Vorschau beim Tippen).
+    // Hinweis: Absichtlich ohne Origin-Check, weil das CMS mal lokal
+    // (localhost) und mal auf Vercel läuft. Es werden nur Texte/Bilder
+    // in der Vorschau ausgetauscht, nichts gespeichert.
+    window.addEventListener("message", (event) => {
+      if (event.data?.type === "CMS_SELECT_MODE") {
+        selectMode = event.data.enabled !== false;
+        return;
+      }
+      if (event.data?.type !== "CMS_FIELD_UPDATE") return;
+      const field = event.data.field;
+      document.querySelectorAll(`[data-cms-field="${field}"]`).forEach((el) => {
+        if (el.tagName === "IMG") {
+          el.src = event.data.value;
+          el.removeAttribute("srcset");
+        } else if (el.tagName === "SOURCE") {
+          el.srcset = event.data.value;
+        } else {
+          el.textContent = event.data.value;
+        }
+      });
+    });
+
+    // Richtung 2: Website -> CMS (Klick auf Text meldet das Feld).
+    // Es werden nur Feld-IDs (z. B. "hero.title") geschickt, keine Inhalte.
+    document.addEventListener(
+      "click",
+      (event) => {
+        if (!selectMode) return;
+        const el = event.target.closest("[data-cms-field]");
+        if (!el) return;
+        event.preventDefault();
+        event.stopPropagation();
+        document
+          .querySelectorAll(".cms-selected")
+          .forEach((n) => n.classList.remove("cms-selected"));
+        el.classList.add("cms-selected");
+        window.parent.postMessage(
+          { type: "CMS_FIELD_SELECT", field: el.getAttribute("data-cms-field") },
+          "*"
+        );
+      },
+      true
+    );
+
+    // Blauer Rahmen beim Drüberfahren, damit Kunden sehen was klickbar ist
+    const style = document.createElement("style");
+    style.textContent = `
+      [data-cms-field]:hover { outline: 2px solid #2563eb; outline-offset: 2px; cursor: pointer; }
+      .cms-selected { outline: 2px solid #2563eb !important; outline-offset: 2px; }
+    `;
+    document.head.appendChild(style);
+  }
+</script>
 ```
+
+Voraussetzung: Jedes editierbare Element trägt `data-cms-field="[feld-id]`
+(genau die ID aus dem Manifest), jede Sektion `data-cms-section="[sektion-id]".
+Das CMS prüft eingehende Klicks seinerseits gegen die Vorschau-Adresse,
+fremde Websites können also nichts auslösen.
 
 ## Publish-Flow
 

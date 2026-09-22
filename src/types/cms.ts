@@ -79,6 +79,8 @@ export interface PublishHistoryEntry {
   /** Vollständige Datei-Inhalte, verschachtelt nach Dateipfad: { "src/content/pages/home.json": { ... } } */
   payload: Record<string, Record<string, unknown>>;
   created_at: string;
+  /** Optionale Notiz, z. B. "Rollback" oder "ai-chat" (Spalte kann fehlen) */
+  note?: string | null;
 }
 
 export type DraftMap = Record<string, string>;
