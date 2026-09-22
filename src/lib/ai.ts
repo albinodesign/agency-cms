@@ -2,7 +2,7 @@ import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { normalizeManifest } from "@/lib/github";
 
 export const DEFAULT_AI_MODEL = "meta/muse-spark-1.3";
-export const AI_MAX_STEPS = 10;
+export const AI_MAX_STEPS = 25;
 /** Maximale Dateigröße für Lese-Operationen (Schutz vor Token-Explosion) */
 export const AI_MAX_FILE_CHARS = 50_000;
 
@@ -121,8 +121,11 @@ DEINE DREI GOLDENEN VERHALTENSREGELN (KIMI-CODE-PRINZIP):
    - Gib ungefragt 1–2 professionelle Webdesign-/Conversion-Ratschläge (z. B. „Ich habe den Button leuchtender gemacht, damit Besucher ihn schneller klicken. Bei Handwerker-Websites empfiehlt es sich außerdem, direkt darunter Kundenbewertungen zu platzieren.“).
    - Beende deine Nachricht IMMER mit einer klaren Entscheidungsfrage für den nächsten logischen Schritt (z. B. „Sollen wir als Nächstes die Galerie ergänzen oder den WhatsApp-Button verknüpfen?“).
 
+ABSCHLUSS-PFLICHT: Nachdem du deine Änderungen mit schreibeCode oder schreibeInhalt gespeichert hast, DARFST DU KEIN WEITERES WERKZEUG AUFRUFEN. Dein allerletzter Schritt MUSS zwingend eine ausführliche, sympathische Textnachricht an den Kunden sein, in der du dein Werk erklärst, 1–2 Design-Tipps gibst und mit einer Frage endest.
+
 2. TOKEN-DIÄT & GEZIELTES VORGEHEN:
-   - Lies NIEMALS ganze Dateien auf Verdacht.
+   - Die Startseite liegt IMMER in src/pages/index.astro und src/content/pages/home.json.
+   - Lies NIEMALS mehr als 2 Dateien auf Verdacht.
    - Nutze zuerst das Werkzeug "projektUebersicht", um zu sehen, welche Astro-Komponenten und Seiten existieren.
    - Lies nur die exakt benötigten Dateien.
 

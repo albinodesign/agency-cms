@@ -161,11 +161,31 @@ export async function POST(request: Request) {
   }
   const activeConvId = convId;
 
-  // Kunden-Nachricht speichern (für Verlauf + späteres Fortsetzen)
+  // Hochgeladene Dateien (Bilder/PDFs als URL) aus der Kundennachricht einsammeln:
+  // convertToModelMessages übergibt sie ans Modell, hier zusätzlich als Hinweis
+  // in den Prompt, damit die KI die URLs direkt im Code verwenden darf.
+  interface HochgeladeneDatei { name?: string; url?: string; mediaType?: string }
+  const hochgeladen: HochgeladeneDatei[] = [];
+  if (userText) {
+    for (const part of (userText.parts ?? []) as Array<{ type?: string; url?: string; mediaType?: string; filename?: string }>) {
+      if (part?.type === "file" && typeof part.url === "string") {
+        hochgeladen.push({ name: part.filename, url: part.url, mediaType: part.mediaType });
+      }
+    }
+  }
+  let system = buildSystemPrompt(site.name, fields, values);
+  if (hochgeladen.length > 0) {
+    const liste = hochgeladen
+      .map((d) => `- ${d.name ?? "Datei"} (${d.mediaType ?? "unbekannt"}): ${d.url}`)
+      .join("\n");
+    system += `\n\nDer Kunde hat ${hochgeladen.length === 1 ? "diese Datei" : "diese Dateien"} im Chat hochgeladen – du kannst sie sehen und die URLs direkt verwenden (z. B. im <img src="..." /> oder im Frontmatter als coverImage):\n${liste}`;
+  }
+
+  // Kunden-Nachricht speichern (für Verlauf + späteres Fortsetzen, inkl. Dateien)
   await supabase.from("ai_messages").insert({
     conversation_id: activeConvId,
     role: "user",
-    content: { text: userContent },
+    content: { text: userContent, dateien: hochgeladen },
   });
 
   const fieldMap = new Map(fields.map((f) => [f.id, f]));
@@ -340,7 +360,7 @@ export async function POST(request: Request) {
   try {
     const result = streamText({
       model,
-      system: buildSystemPrompt(site.name, fields, values),
+      system,
       messages: modelMessages,
       tools,
       stopWhen: stepCountIs(AI_MAX_STEPS),

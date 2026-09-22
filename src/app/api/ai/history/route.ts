@@ -46,10 +46,14 @@ export async function GET(request: Request) {
     .order("created_at", { ascending: true })
     .limit(40);
 
-  const messages = ((rows ?? []) as Array<{ role: string; content: { text?: string } | null }>)
+  const messages = ((rows ?? []) as Array<{ role: string; content: { text?: string; dateien?: Array<{ name?: string; url?: string; mediaType?: string }> } | null }>)
     .filter((r) => r.role === "user" || r.role === "assistant")
-    .map((r) => ({ role: r.role, text: typeof r.content?.text === "string" ? r.content.text : "" }))
-    .filter((m) => m.text !== "");
+    .map((r) => ({
+      role: r.role,
+      text: typeof r.content?.text === "string" ? r.content.text : "",
+      dateien: Array.isArray(r.content?.dateien) ? r.content.dateien : [],
+    }))
+    .filter((m) => m.text !== "" || m.dateien.length > 0);
 
   return NextResponse.json({ conversation: conv, messages });
 }
