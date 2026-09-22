@@ -61,6 +61,8 @@ export interface Site {
   repo_owner: string;
   repo_name: string;
   created_at?: string;
+  /** true = Kunde sieht den KI-Chat im Editor (Schalter im Dashboard) */
+  ai_enabled?: boolean;
 }
 
 export interface Draft {
@@ -84,3 +86,30 @@ export interface PublishHistoryEntry {
 }
 
 export type DraftMap = Record<string, string>;
+
+/** Freier Datei-Pfad als Entwurfs-ID: "json:<datei>:<pfad>", z. B. "json:src/content/pages/home.json:hero.title" */
+export const FREE_DRAFT_PREFIX = "json:";
+
+export interface CodeDraft {
+  id: string;
+  site_id: string;
+  file_path: string;
+  content: string;
+  updated_at: string;
+}
+
+export interface AiConversation {
+  id: string;
+  site_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AiUsage {
+  site_id: string;
+  month: string;
+  messages: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+}

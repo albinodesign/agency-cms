@@ -136,6 +136,26 @@ Wenn das Manifest das Blog-Feature aktiviert, erscheint im Editor ein zweiter Ta
 
 Artikel werden als Markdown-Dateien mit Frontmatter in `src/content/blog/` des Website-Repos verwaltet (API: `GET`/`POST`/`DELETE /api/blog`, Commits: `cms: save blog post [slug]` / `cms: delete blog post [slug]`). Das Frontmatter enthält `title`, `slug`, `date`, `coverImage`, `excerpt` und `draft`.
 
+## KI-Chat (OpenRouter)
+
+Kunden mit Freischaltung sehen im Editor einen **KI-Chat**-Knopf. Die KI bereitet
+Inhalts- und Design-Änderungen als Entwürfe vor – live geht es erst per
+Veröffentlichen-Knopf (mit Prüfung). Die KI committet niemals selbst.
+
+Setup in 3 Schritten:
+
+1. **Datenbank:** `supabase/ai-chat-schema.sql` einmalig im Supabase SQL-Editor
+   ausführen (Schalter-Spalte, Gespräche, Code-Entwürfe, Kosten-Zähler inkl. Regeln).
+2. **Schlüssel:** `OPENROUTER_API_KEY` vom OpenRouter-Dashboard (https://openrouter.ai/keys)
+   in `.env.local` (lokal) und in Vercel → Settings → Environment Variables (live) eintragen.
+   Modell wechseln = nur die Zeile `AI_MODEL` ändern (exakte ID aus OpenRouter, z. B. `meta/muse-spark-1.3`).
+3. **Freischalten:** Im Dashboard pro Website-Karte den **KI-Chat**-Schalter umlegen (nur Admins).
+
+Sicherheitsregeln der KI (in `src/lib/ai.ts`): Nur Ordner `src/content` (Inhalte),
+`src/components`, `src/pages`, `src/layouts`, `src/styles` (Design). Tabu: Paket- und
+Config-Dateien, Schlüssel, Passwörter. Die CMS-Vorschau-Brücke darf nie entfernt werden.
+Jede Veröffentlichung sichert Inhalte UND Code – der Verlauf stellt alles wieder her.
+
 ## Live-Vorschau auf der Astro-Website
 
 Damit Eingaben sofort im Iframe sichtbar werden UND Klicks auf der Website

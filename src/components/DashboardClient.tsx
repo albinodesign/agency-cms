@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { LogoutButton } from "@/components/LogoutButton";
 import { CreateSiteModal } from "@/components/CreateSiteModal";
-import { ArrowRight, Globe, Plus } from "lucide-react";
+import { ArrowRight, Globe, Plus, Sparkles } from "lucide-react";
 import type { Site } from "@/types/cms";
 
 interface DashboardClientProps {
@@ -20,6 +20,30 @@ export function DashboardClient({
 }: DashboardClientProps) {
   const [sites, setSites] = useState<Site[]>(initialSites);
   const [modalOpen, setModalOpen] = useState(false);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+
+  /** KI-Chat pro Website an-/ausschalten (nur Admins). */
+  async function toggleAi(site: Site) {
+    const enabled = !site.ai_enabled;
+    setTogglingId(site.id);
+    try {
+      const res = await fetch("/api/admin/toggle-ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ siteId: site.id, enabled }),
+      });
+      const body = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        alert(body.error ?? "Schalter konnte nicht umgelegt werden.");
+        return;
+      }
+      setSites((prev) => prev.map((s) => (s.id === site.id ? { ...s, ai_enabled: enabled } : s)));
+    } catch {
+      alert("Server nicht erreichbar. Bitte später erneut versuchen.");
+    } finally {
+      setTogglingId(null);
+    }
+  }
 
   return (
     <div className="min-h-screen bg-zinc-50">
@@ -86,6 +110,34 @@ export function DashboardClient({
               <p className="mt-1 truncate text-sm text-zinc-500">
                 {site.domain ?? site.preview_url}
               </p>
+              {isAdmin && (
+                <button
+                  onClick={() => void toggleAi(site)}
+                  disabled={togglingId === site.id}
+                  title={site.ai_enabled ? "KI-Chat ausschalten" : "KI-Chat freischalten"}
+                  className={`mt-4 flex items-center justify-between rounded-lg border px-3 py-2 text-xs font-medium transition disabled:opacity-60 ${
+                    site.ai_enabled
+                      ? "border-violet-300 bg-violet-50 text-violet-800"
+                      : "border-zinc-200 bg-zinc-50 text-zinc-500 hover:bg-zinc-100"
+                  }`}
+                >
+                  <span className="flex items-center gap-1.5">
+                    <Sparkles className="h-3.5 w-3.5" />
+                    KI-Chat {site.ai_enabled ? "an" : "aus"}
+                  </span>
+                  <span
+                    className={`relative h-5 w-9 shrink-0 rounded-full transition ${
+                      site.ai_enabled ? "bg-violet-600" : "bg-zinc-300"
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${
+                        site.ai_enabled ? "left-[18px]" : "left-0.5"
+                      }`}
+                    />
+                  </span>
+                </button>
+              )}
               <Link
                 href={`/editor/${site.id}`}
                 className="mt-6 inline-flex items-center justify-center gap-2 rounded-lg bg-zinc-900 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-zinc-700"

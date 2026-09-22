@@ -1,15 +1,28 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createOctokit } from "@/lib/github";
+import { isAllowedCodePath, isAllowedContentPath } from "@/lib/ai";
 import type { PublishHistoryEntry, Site } from "@/types/cms";
 
 const COMMIT_MESSAGE = "cms: rollback to historical version";
 
 type Payload = Record<string, Record<string, unknown>>;
 
-/** Whitelist: Es dürfen nur JSON-Dateien unter src/content/ überschrieben werden. */
+/**
+ * Whitelist: Inhalts-JSONs, Blog-Artikel und Arbeits-Code dürfen
+ * wiederhergestellt werden – niemals Configs oder Secrets.
+ */
 function isAllowedFilePath(filePath: string): boolean {
-  return filePath.startsWith("src/content/") && filePath.endsWith(".json");
+  return isAllowedContentPath(filePath) || isAllowedCodePath(filePath);
+}
+
+/** Rohtext-Snapshots tragen nur den Schlüssel __text (siehe publish-Route). */
+function asRawText(value: Record<string, unknown>): string | null {
+  const keys = Object.keys(value);
+  if (keys.length === 1 && keys[0] === "__text" && typeof value.__text === "string") {
+    return value.__text;
+  }
+  return null;
 }
 
 function isValidPayload(payload: unknown): payload is Payload {
@@ -98,12 +111,12 @@ export async function POST(request: Request) {
       );
     }
 
-    // Pfad-Whitelist: nur JSON-Dateien unter src/content/ dürfen überschrieben werden
+    // Pfad-Whitelist: nur erlaubte Inhalts-/Code-Dateien dürfen überschrieben werden
     const forbiddenPaths = Object.keys(payload).filter((p) => !isAllowedFilePath(p));
     if (forbiddenPaths.length > 0) {
       return NextResponse.json(
         {
-          error: `Der Payload enthält nicht erlaubte Dateipfade: ${forbiddenPaths.join(", ")}. Es dürfen nur .json-Dateien unter src/content/ wiederhergestellt werden.`,
+          error: `Der Payload enthält nicht erlaubte Dateipfade: ${forbiddenPaths.join(", ")}.`,
         },
         { status: 400 }
       );
@@ -113,6 +126,7 @@ export async function POST(request: Request) {
     let lastCommitSha: string | null = null;
 
     // Jede Datei im Payload: aktuellen SHA holen, alten Stand darüber committen
+    // (JSON als formatiertes JSON, Text-Dateien wie Blog/Code als Rohtext)
     for (const [filePath, oldContent] of Object.entries(payload)) {
       let currentSha: string;
       try {
@@ -136,12 +150,13 @@ export async function POST(request: Request) {
       }
 
       try {
+        const raw = asRawText(oldContent);
         const { data: commitData } = await octokit.repos.createOrUpdateFileContents({
           owner: typedSite.repo_owner,
           repo: typedSite.repo_name,
           path: filePath,
           message: COMMIT_MESSAGE,
-          content: Buffer.from(JSON.stringify(oldContent, null, 2)).toString("base64"),
+          content: Buffer.from(raw ?? JSON.stringify(oldContent, null, 2)).toString("base64"),
           sha: currentSha,
           branch: "main",
         });
@@ -156,7 +171,7 @@ export async function POST(request: Request) {
       }
     }
 
-    // Alle offenen Drafts dieser Site verwerfen
+    // Alle offenen Entwürfe dieser Site verwerfen (Formular + Code)
     const { error: deleteError } = await supabase
       .from("drafts")
       .delete()
@@ -170,6 +185,15 @@ export async function POST(request: Request) {
         },
         { status: 500 }
       );
+    }
+
+    const { error: codeDeleteError } = await supabase
+      .from("code_drafts")
+      .delete()
+      .eq("site_id", siteId);
+
+    if (codeDeleteError) {
+      console.error("Rollback: code_drafts delete fehlgeschlagen:", codeDeleteError.message);
     }
 
     // Rollback als neuen Verlaufseintrag dokumentieren (mit Notiz "Rollback")

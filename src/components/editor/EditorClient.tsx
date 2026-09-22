@@ -5,6 +5,7 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { ImageField } from "@/components/editor/ImageField";
 import { HistoryDrawer } from "@/components/editor/HistoryDrawer";
+import { ChatDrawer } from "@/components/editor/ChatDrawer";
 import { BlogPanel } from "@/components/editor/BlogPanel";
 import {
   AlertTriangle,
@@ -21,6 +22,7 @@ import {
   Rocket,
   Search,
   Smartphone,
+  Sparkles,
   X,
 } from "lucide-react";
 import type {
@@ -118,6 +120,7 @@ export function EditorClient({
   const [viewport, setViewport] = useState<Viewport>("desktop");
   const [publishing, setPublishing] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
   const [historyRefresh, setHistoryRefresh] = useState(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [activeTab, setActiveTab] = useState<"content" | "blog">("content");
@@ -348,6 +351,12 @@ export function EditorClient({
     }
   }
 
+  // Alle Felder flach für den KI-Chat (Kontext + Übernahme)
+  const allFields = useMemo(
+    () => sections.flatMap((s) => s.fields ?? []),
+    [sections]
+  );
+
   const hasDrafts = dirtyFields.size > 0;
 
   /** Lädt die Vorschau neu (z. B. wenn der Vercel-Bau fertig ist). */
@@ -362,6 +371,12 @@ export function EditorClient({
   const openLiveSite = useCallback(() => {
     window.open(site.preview_url, "_blank", "noopener");
   }, [site.preview_url]);
+
+  /** Markiert einen KI-Entwurf als ungespeichert (Badge oben), ohne ins Formular zu schreiben. */
+  const touchDraft = useCallback((fieldId: string) => {
+    setDirtyFields((prev) => new Set(prev).add(fieldId));
+    setStatus("saved");
+  }, []);
 
   /** Meldet der Vorschau ob Klicks Felder suchen (Finden) oder normal funktionieren (Surfen). */
   const sendSelectMode = useCallback(
@@ -454,6 +469,15 @@ export function EditorClient({
 
         <div className="flex items-center gap-3">
           <StatusBadge status={status} hasDrafts={hasDrafts} />
+          {site.ai_enabled && (
+            <button
+              onClick={() => setChatOpen(true)}
+              className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-violet-500"
+            >
+              <Sparkles className="h-4 w-4" />
+              <span className="hidden sm:inline">KI-Chat</span>
+            </button>
+          )}
           <button
             onClick={() => setHistoryOpen(true)}
             className="flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-100"
@@ -848,6 +872,21 @@ export function EditorClient({
         onSuccess={(msg) => pushToast("success", msg)}
         refreshSignal={historyRefresh}
       />
+
+      {/* KI-Chat-Drawer (nur wenn für diese Website freigeschaltet) */}
+      {site.ai_enabled && (
+        <ChatDrawer
+          siteId={site.id}
+          fields={allFields}
+          values={values}
+          open={chatOpen}
+          onClose={() => setChatOpen(false)}
+          onFieldApplied={handleChange}
+          onDraftTouched={touchDraft}
+          onError={pushErrorToast}
+          onSuccess={(msg) => pushToast("success", msg)}
+        />
+      )}
 
       {/* Toasts */}
       <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-80 flex-col gap-2">
