@@ -131,6 +131,7 @@ export default async function EditorPage({ params }: EditorPageProps) {
       manifestError={manifestError}
       contentWarning={contentWarning}
       initialValues={initialValues}
+      liveValues={liveValues}
       draftFields={Object.keys(drafts)}
     />
   );

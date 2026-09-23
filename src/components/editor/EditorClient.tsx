@@ -14,12 +14,15 @@ import {
   ChevronDown,
   ChevronsDownUp,
   ChevronsUpDown,
+  Download,
+  Eye,
   FileText,
   History,
   Loader2,
   Monitor,
   Newspaper,
   Rocket,
+  RotateCcw,
   Search,
   Smartphone,
   Sparkles,
@@ -43,6 +46,8 @@ interface EditorClientProps {
   contentWarning: string | null;
   /** Live-Werte aus GitHub, bereits mit Drafts gemergt */
   initialValues: DraftMap;
+  /** Reine Live-Werte aus GitHub (ohne Drafts) – für Undo + Diff-Vergleich */
+  liveValues: DraftMap;
   /** Feld-IDs, zu denen ein unveröffentlichter Draft existiert */
   draftFields: string[];
 }
@@ -95,6 +100,7 @@ export function EditorClient({
   manifestError,
   contentWarning,
   initialValues,
+  liveValues: initialLiveValues,
   draftFields,
 }: EditorClientProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -111,6 +117,9 @@ export function EditorClient({
   }, [site.preview_url]);
 
   const [values, setValues] = useState<DraftMap>(initialValues);
+  // Reine Live-Werte (ohne Drafts) – Vergleichsbasis für Undo + Diff.
+  // Nach erfolgreichem Publish werden sie auf den neuen Stand gesetzt.
+  const [liveMap, setLiveMap] = useState<DraftMap>(initialLiveValues);
   const [dirtyFields, setDirtyFields] = useState<Set<string>>(
     () => new Set(draftFields)
   );
@@ -121,6 +130,9 @@ export function EditorClient({
   const [publishing, setPublishing] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const [backupLoading, setBackupLoading] = useState(false);
+  const [diffOpen, setDiffOpen] = useState(false);
+  const [codeDraftFiles, setCodeDraftFiles] = useState<string[]>([]);
   const [historyRefresh, setHistoryRefresh] = useState(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [activeTab, setActiveTab] = useState<"content" | "blog">("content");
@@ -202,12 +214,6 @@ export function EditorClient({
 
   const activePage = pages.find((p) => p.id === activePageId) ?? pages[0] ?? null;
   const isSearching = searchQuery.trim() !== "";
-
-  // Warnung bei überladenen Manifesten: mehr als 80 Felder überfordern Kunden
-  const totalFields = useMemo(
-    () => sections.reduce((sum, s) => sum + (s.fields?.length ?? 0), 0),
-    [sections]
-  );
 
   // Bei aktiver Suche über alle Seiten hinweg anzeigen, sonst nur die aktive Seite
   const visibleSections = useMemo<ManifestSection[]>(
@@ -334,6 +340,8 @@ export function EditorClient({
 
       setDirtyFields(new Set());
       setStatus("live");
+      // Live-Vergleich auf den neuen Stand setzen (Undo/Diff danach wieder korrekt)
+      setLiveMap({ ...values });
       // Verlaufs-Liste sofort neu laden lassen
       setHistoryRefresh((k) => k + 1);
       // Ehrlicher Hinweis statt Fake-Balken: Die Daten sind bei GitHub,
@@ -357,6 +365,12 @@ export function EditorClient({
     [sections]
   );
 
+  /** Geänderte Formular-Felder für den Diff-Inspektor (Live vs. Entwurf). */
+  const changedFields = useMemo(
+    () => allFields.filter((f) => (values[f.id] ?? "") !== (liveMap[f.id] ?? "")),
+    [allFields, values, liveMap]
+  );
+
   const hasDrafts = dirtyFields.size > 0;
 
   /** Lädt die Vorschau neu (z. B. wenn der Vercel-Bau fertig ist). */
@@ -377,6 +391,76 @@ export function EditorClient({
     setDirtyFields((prev) => new Set(prev).add(fieldId));
     setStatus("saved");
   }, []);
+
+  /** Lädt das komplette Website-Repo als .zip herunter (1-Klick-Backup). */
+  async function handleBackup() {
+    if (backupLoading) return;
+    setBackupLoading(true);
+    try {
+      const res = await fetch(`/api/site/${site.id}/download-backup`);
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        pushToast("error", body?.error ?? "Backup konnte nicht erstellt werden.");
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${site.repo_name}-backup.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+      pushToast("success", "Backup wurde heruntergeladen.");
+    } catch {
+      pushToast("error", "Server nicht erreichbar. Backup konnte nicht erstellt werden.");
+    } finally {
+      setBackupLoading(false);
+    }
+  }
+
+  /** Setzt ein einzelnes Feld auf den Live-Stand zurück (Undo pro Feld). */
+  const handleFieldUndo = useCallback(
+    async (fieldId: string) => {
+      const liveValue = liveMap[fieldId] ?? "";
+      setValues((prev) => ({ ...prev, [fieldId]: liveValue }));
+      setDirtyFields((prev) => {
+        const next = new Set(prev);
+        next.delete(fieldId);
+        return next;
+      });
+      // Vorschau springt sofort auf den Live-Stand zurück
+      if (previewOrigin) {
+        iframeRef.current?.contentWindow?.postMessage(
+          { type: "CMS_FIELD_UPDATE", field: fieldId, value: liveValue },
+          previewOrigin
+        );
+      }
+      try {
+        const supabase = createClient();
+        await supabase.from("drafts").delete().eq("site_id", site.id).eq("field_id", fieldId);
+      } catch {
+        pushToast("error", "Entwurf konnte nicht aus der Datenbank gelöscht werden – bitte Seite neu laden.");
+      }
+    },
+    [liveMap, previewOrigin, site.id, pushToast]
+  );
+
+  /** Öffnet den Diff-Inspektor und lädt zusätzlich offene Datei-Entwürfe. */
+  const openDiff = useCallback(async () => {
+    setDiffOpen(true);
+    try {
+      const supabase = createClient();
+      const { data } = await supabase
+        .from("code_drafts")
+        .select("file_path")
+        .eq("site_id", site.id);
+      setCodeDraftFiles(((data ?? []) as Array<{ file_path: string }>).map((r) => r.file_path));
+    } catch {
+      setCodeDraftFiles([]);
+    }
+  }, [site.id]);
 
   // KI-Entwürfe wurden serverseitig bereits in drafts geupsertet.
   // Hier nur lokalen State & Live-Iframe aktualisieren (kein erneuter DB-Timer!).
@@ -486,7 +570,12 @@ export function EditorClient({
         </div>
 
         <div className="flex items-center gap-3">
-          <StatusBadge status={status} hasDrafts={hasDrafts} />
+          <StatusBadge
+            status={status}
+            hasDrafts={hasDrafts}
+            draftCount={dirtyFields.size}
+            onOpenDiff={hasDrafts ? () => void openDiff() : undefined}
+          />
           {site.ai_enabled && (
             <button
               onClick={() => setChatOpen(true)}
@@ -502,6 +591,19 @@ export function EditorClient({
           >
             <History className="h-4 w-4" />
             <span className="hidden sm:inline">Verlauf</span>
+          </button>
+          <button
+            onClick={() => void handleBackup()}
+            disabled={backupLoading}
+            title="Komplette Website als .zip herunterladen"
+            className="flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-60"
+          >
+            {backupLoading ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Download className="h-4 w-4" />
+            )}
+            <span className="hidden sm:inline">Backup (.zip)</span>
           </button>
           <button
             onClick={handlePublish}
@@ -635,20 +737,6 @@ export function EditorClient({
               </div>
             )}
 
-            {!manifestError && totalFields > 80 && (
-              <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-                <div className="flex items-start gap-2">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <p>
-                    Diese Website hat sehr viele Felder ({totalFields}). Wenn
-                    Kunden sich beschweren dass alles unübersichtlich ist, frage
-                    deine Agentur ob wirklich alle Felder nötig sind – weniger
-                    ist mehr.
-                  </p>
-                </div>
-              </div>
-            )}
-
             {/* Tabs: nur wenn das Blog-Feature im Manifest aktiviert ist */}
             {blogEnabled && !manifestError && (
               <div className="mb-6 flex rounded-xl border border-zinc-200 bg-zinc-100 p-1">
@@ -778,6 +866,8 @@ export function EditorClient({
                               onChange={(v) => handleChange(field.id, v)}
                               onError={pushErrorToast}
                               selected={selectedFieldId === field.id}
+                              changed={(values[field.id] ?? "") !== (liveMap[field.id] ?? "")}
+                              onUndo={() => void handleFieldUndo(field.id)}
                             />
                           ))}
                         </div>
@@ -906,6 +996,99 @@ export function EditorClient({
         />
       )}
 
+      {/* Diff-Inspektor: Vorher/Nachher vor dem Veröffentlichen */}
+      {diffOpen && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-zinc-900/40"
+            onClick={() => setDiffOpen(false)}
+            aria-hidden
+          />
+          <div className="relative flex max-h-[85vh] w-full max-w-xl flex-col rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4">
+              <h2 className="text-sm font-semibold text-zinc-900">
+                Ausstehende Änderungen prüfen
+              </h2>
+              <button
+                onClick={() => setDiffOpen(false)}
+                className="rounded-lg p-1.5 text-zinc-500 transition hover:bg-zinc-100"
+                aria-label="Schließen"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
+              {changedFields.length === 0 && codeDraftFiles.length === 0 && (
+                <p className="py-6 text-center text-sm text-zinc-500">
+                  Keine ausstehenden Änderungen.
+                </p>
+              )}
+              {changedFields.map((field) => {
+                const oldValue = liveMap[field.id] ?? "";
+                const newValue = values[field.id] ?? "";
+                return (
+                  <div key={field.id} className="rounded-xl border border-zinc-200 p-3">
+                    <p className="text-xs font-semibold text-zinc-900">{field.label}</p>
+                    <p className="mt-1.5 break-words text-xs text-zinc-400">
+                      <span className="font-medium">Live: </span>
+                      <span className="rounded bg-red-50 px-1 text-red-700 line-through">
+                        {oldValue === "" ? "(leer)" : oldValue.slice(0, 300)}
+                      </span>
+                    </p>
+                    <p className="mt-1 break-words text-xs text-zinc-600">
+                      <span className="font-medium">Neu: </span>
+                      <span className="rounded bg-emerald-50 px-1 text-emerald-800">
+                        {newValue === "" ? "(leer)" : newValue.slice(0, 300)}
+                      </span>
+                    </p>
+                  </div>
+                );
+              })}
+              {codeDraftFiles.length > 0 && (
+                <div className="rounded-xl border border-violet-200 bg-violet-50/50 p-3">
+                  <p className="text-xs font-semibold text-violet-900">
+                    Datei-Entwürfe ({codeDraftFiles.length})
+                  </p>
+                  <ul className="mt-1.5 space-y-0.5">
+                    {codeDraftFiles.map((f) => (
+                      <li key={f} className="truncate font-mono text-[11px] text-violet-700">
+                        {f}
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="mt-1.5 text-[11px] text-violet-600">
+                    Design- und Datei-Änderungen siehst du nach dem Veröffentlichen in der Vorschau.
+                  </p>
+                </div>
+              )}
+            </div>
+            <div className="flex gap-2 border-t border-zinc-200 px-5 py-4">
+              <button
+                onClick={() => setDiffOpen(false)}
+                className="flex-1 rounded-lg border border-zinc-300 px-4 py-2.5 text-sm font-medium text-zinc-700 transition hover:bg-zinc-100"
+              >
+                Schließen
+              </button>
+              <button
+                onClick={() => {
+                  setDiffOpen(false);
+                  void handlePublish();
+                }}
+                disabled={publishing || (!hasDrafts && codeDraftFiles.length === 0)}
+                className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-60"
+              >
+                {publishing ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Rocket className="h-4 w-4" />
+                )}
+                Jetzt veröffentlichen
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Toasts */}
       <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-80 flex-col gap-2">
         {toasts.map((toast) => (
@@ -941,9 +1124,14 @@ export function EditorClient({
 function StatusBadge({
   status,
   hasDrafts,
+  draftCount,
+  onOpenDiff,
 }: {
   status: SaveStatus;
   hasDrafts: boolean;
+  draftCount: number;
+  /** Wenn gesetzt: Badge ist anklickbar und öffnet den Diff-Inspektor */
+  onOpenDiff?: () => void;
 }) {
   if (status === "saving") {
     return (
@@ -954,10 +1142,24 @@ function StatusBadge({
     );
   }
   if (status === "saved" || hasDrafts) {
+    const label = `Entwurf gesichert (${draftCount} ungespeicherte Änderung${draftCount === 1 ? "" : "en"})`;
+    if (onOpenDiff) {
+      return (
+        <button
+          onClick={onOpenDiff}
+          title="Ausstehende Änderungen prüfen"
+          className="flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 transition hover:bg-amber-100"
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+          {label}
+          <Eye className="h-3.5 w-3.5" />
+        </button>
+      );
+    }
     return (
       <span className="flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
         <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-        Entwurf gesichert (Noch nicht live)
+        {label}
       </span>
     );
   }
@@ -969,6 +1171,20 @@ function StatusBadge({
   );
 }
 
+/** Unaufdringlicher Zurücksetzen-Knopf pro Feld (Undo auf Live-Stand). */
+function UndoButton({ onUndo }: { onUndo: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onUndo}
+      title="Auf Live-Stand zurücksetzen"
+      className="rounded-md p-1 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700"
+    >
+      <RotateCcw className="h-3.5 w-3.5" />
+    </button>
+  );
+}
+
 function FieldEditor({
   field,
   value,
@@ -976,6 +1192,8 @@ function FieldEditor({
   onChange,
   onError,
   selected,
+  changed,
+  onUndo,
 }: {
   field: ManifestField;
   value: string;
@@ -984,6 +1202,9 @@ function FieldEditor({
   onError: (message: string) => void;
   /** true wenn das Feld gerade per Klick in der Vorschau ausgewählt wurde */
   selected: boolean;
+  /** true wenn der Wert vom Live-Stand abweicht (Undo anbieten) */
+  changed: boolean;
+  onUndo: () => void;
 }) {
   const baseClass =
     "w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10";
@@ -1002,18 +1223,28 @@ function FieldEditor({
       }`}
     >
       {field.type === "image" ? (
-        <ImageField
-          field={field}
-          value={value}
-          siteId={siteId}
-          onChange={onChange}
-          onError={onError}
-        />
+        <>
+          {changed && (
+            <div className="mb-2 flex justify-end">
+              <UndoButton onUndo={onUndo} />
+            </div>
+          )}
+          <ImageField
+            field={field}
+            value={value}
+            siteId={siteId}
+            onChange={onChange}
+            onError={onError}
+          />
+        </>
       ) : (
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-zinc-700">
-            {field.label}
-          </label>
+          <div className="mb-1.5 flex items-center justify-between gap-2">
+            <label className="block text-sm font-medium text-zinc-700">
+              {field.label}
+            </label>
+            {changed && <UndoButton onUndo={onUndo} />}
+          </div>
 
           {field.type === "text" && (
             <input
