@@ -222,7 +222,7 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({
-      message: `Version erfolgreich wiederhergestellt (${Object.keys(payload).length} Datei(en) auf main committed).`,
+      message: `Version erfolgreich wiederhergestellt (${Object.keys(payload).length} Datei(en) live geschaltet).`,
       commitSha: lastCommitSha,
     });
   } catch (err) {

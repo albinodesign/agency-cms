@@ -211,6 +211,17 @@ export function ImageField({
         onChange={(e) => onChange(e.target.value)}
         className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-600 outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10"
       />
+
+      {/* Bildformat-Hinweis aus dem Manifest (hilft Kunden beim richtigen Foto) */}
+      {field.aspectRatio === "16:9" && (
+        <p className="mt-1.5 text-xs text-zinc-500">💡 Empfohlen: Querformat / Breitbild (16:9)</p>
+      )}
+      {field.aspectRatio === "1:1" && (
+        <p className="mt-1.5 text-xs text-zinc-500">💡 Empfohlen: Quadratisches Bild (1:1)</p>
+      )}
+      {field.aspectRatio === "4:3" && (
+        <p className="mt-1.5 text-xs text-zinc-500">💡 Empfohlen: Standard-Fotoformat (4:3)</p>
+      )}
     </div>
   );
 }

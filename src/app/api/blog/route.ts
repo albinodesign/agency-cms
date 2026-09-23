@@ -198,7 +198,7 @@ export async function POST(request: Request) {
 
   const slug = slugify(body.slug ?? "");
   if (!slug) {
-    return NextResponse.json({ error: "Ungültiger oder fehlender Slug." }, { status: 400 });
+    return NextResponse.json({ error: "Ungültige oder fehlende Webadresse." }, { status: 400 });
   }
 
   const fm = body.frontmatter ?? {};

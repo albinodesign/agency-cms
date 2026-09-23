@@ -286,8 +286,12 @@ export async function POST(request: Request) {
         );
       }
       for (const edit of edits) {
+        // Ja/Nein-Schalter als echte Booleans speichern (nicht als Text),
+        // Zahlen als echte Zahlen – sonst meckert die Website-Prüfung
         let stored: unknown = edit.value;
-        if (edit.isNumber && edit.value.trim() !== "") {
+        if (edit.value === "true") stored = true;
+        else if (edit.value === "false") stored = false;
+        else if (edit.isNumber && edit.value.trim() !== "") {
           stored = Number(edit.value.trim().replace(",", "."));
         }
         setByPath(json, edit.path, stored);

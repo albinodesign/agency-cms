@@ -64,7 +64,7 @@ interface PageGroup {
   sections: ManifestSection[];
 }
 
-type DeployState = "idle" | "building" | "done";
+type DeployState = "idle" | "sending" | "building" | "done";
 
 /** Bekannte Seiten-Präfixe (Sektions-ID/Titel oder Dateiname) -> Tab-Label */
 const PAGE_KEYWORDS: [RegExp, string][] = [
@@ -147,6 +147,8 @@ export function EditorClient({
   // Zuletzt angeklicktes Feld (wird kurz gelb markiert)
   const [selectedFieldId, setSelectedFieldId] = useState<string | null>(null);
   const selectFlashRef = useRef<number | null>(null);
+  // Timer für die Bau-Phase nach dem Veröffentlichen (wird beim Verlassen gelöscht)
+  const deployTimerRef = useRef<number | null>(null);
 
   // Blog-Feature aktiviert? (features.blog === true oder features.blog.enabled === true)
   const blogEnabled = useMemo(() => {
@@ -258,6 +260,7 @@ export function EditorClient({
     return () => {
       timers.forEach((t) => clearTimeout(t));
       if (selectFlashRef.current) window.clearTimeout(selectFlashRef.current);
+      if (deployTimerRef.current) window.clearTimeout(deployTimerRef.current);
     };
   }, []);
 
@@ -325,6 +328,8 @@ export function EditorClient({
 
   async function handlePublish() {
     setPublishing(true);
+    // Phase 1: Übertragen läuft (Anfrage an den Server)
+    setDeployState("sending");
     try {
       const res = await fetch("/api/publish", {
         method: "POST",
@@ -334,6 +339,7 @@ export function EditorClient({
       const body = (await res.json()) as { error?: string; message?: string };
 
       if (!res.ok) {
+        setDeployState("idle");
         pushToast("error", body.error ?? "Veröffentlichung fehlgeschlagen.");
         return;
       }
@@ -344,15 +350,22 @@ export function EditorClient({
       setLiveMap({ ...values });
       // Verlaufs-Liste sofort neu laden lassen
       setHistoryRefresh((k) => k + 1);
-      // Ehrlicher Hinweis statt Fake-Balken: Die Daten sind bei GitHub,
-      // Vercel baut jetzt im Hintergrund (Dauer schwankt: ca. 1-2 Minuten).
-      // Der Kunde lädt die Vorschau selbst neu, wenn er soweit ist.
+      // Phase 2: Website wird neu aufgebaut (ca. 45–60 Sek.), danach Phase 3:
+      // Fertig-Meldung + Vorschau automatisch neu laden
       setDeployState("building");
+      if (deployTimerRef.current) window.clearTimeout(deployTimerRef.current);
+      deployTimerRef.current = window.setTimeout(() => {
+        setDeployState("done");
+        if (iframeRef.current) {
+          iframeRef.current.src = iframeRef.current.src;
+        }
+      }, 50_000);
       pushToast(
         "success",
-        body.message ?? "Änderungen wurden übertragen. Vercel baut die Website jetzt im Hintergrund."
+        body.message ?? "Änderungen wurden übertragen. Die Website wird jetzt neu aufgebaut."
       );
     } catch {
+      setDeployState("idle");
       pushToast("error", "Server nicht erreichbar. Bitte später erneut versuchen.");
     } finally {
       setPublishing(false);
@@ -371,15 +384,25 @@ export function EditorClient({
     [allFields, values, liveMap]
   );
 
-  const hasDrafts = dirtyFields.size > 0;
+  /** Freie Entwürfe (z. B. Banner) für den Diff-Inspektor. */
+  const changedFreeDrafts = useMemo(
+    () =>
+      [...dirtyFields]
+        .filter((id) => id.startsWith("json:"))
+        .map((id) => {
+          const rest = id.slice("json:".length);
+          const sep = rest.indexOf(":");
+          return {
+            id,
+            label: sep >= 0 ? rest.slice(sep + 1) : rest,
+            oldValue: liveMap[id] ?? "",
+            newValue: values[id],
+          };
+        }),
+    [dirtyFields, liveMap, values]
+  );
 
-  /** Lädt die Vorschau neu (z. B. wenn der Vercel-Bau fertig ist). */
-  const reloadPreview = useCallback(() => {
-    if (iframeRef.current) {
-      iframeRef.current.src = iframeRef.current.src;
-    }
-    setDeployState("done");
-  }, []);
+  const hasDrafts = dirtyFields.size > 0;
 
   /** Öffnet die echte Live-Website in einem neuen Tab. */
   const openLiveSite = useCallback(() => {
@@ -658,30 +681,33 @@ export function EditorClient({
             {deployState !== "idle" && (
               <div
                 className={`mb-6 rounded-xl border px-4 py-3 text-sm ${
-                  deployState === "building"
-                    ? "border-blue-200 bg-blue-50 text-blue-800"
-                    : "border-emerald-200 bg-emerald-50 text-emerald-800"
+                  deployState === "sending"
+                    ? "border-amber-200 bg-amber-50 text-amber-800"
+                    : deployState === "building"
+                      ? "border-blue-200 bg-blue-50 text-blue-800"
+                      : "border-emerald-200 bg-emerald-50 text-emerald-800"
                 }`}
               >
-                {deployState === "building" ? (
+                {deployState === "sending" && (
+                  <div className="flex items-center gap-2">
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                    <p className="font-medium">
+                      🟡 Änderungen werden übertragen …
+                    </p>
+                  </div>
+                )}
+                {deployState === "building" && (
                   <div className="flex items-start gap-2">
                     <Rocket className="mt-0.5 h-4 w-4 shrink-0" />
                     <div className="flex-1">
                       <p className="font-medium">
-                        Übertragen! Vercel baut die Website gerade neu – das
-                        dauert meist 1–2 Minuten.
+                        🔵 Website wird neu aufgebaut (Dauer: ca. 45–60 Sek.) …
                       </p>
                       <p className="mt-1 text-blue-700/80">
-                        Die Vorschau hier zeigt noch den alten Stand, bis du sie
-                        neu lädst.
+                        Gleich ist alles fertig – die Vorschau lädt danach von
+                        allein neu.
                       </p>
                       <div className="mt-3 flex flex-wrap gap-2">
-                        <button
-                          onClick={reloadPreview}
-                          className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-500"
-                        >
-                          Vorschau neu laden
-                        </button>
                         <button
                           onClick={openLiveSite}
                           className="rounded-lg border border-blue-300 bg-white px-3 py-1.5 text-xs font-semibold text-blue-800 transition hover:bg-blue-100"
@@ -698,11 +724,12 @@ export function EditorClient({
                       <X className="h-4 w-4" />
                     </button>
                   </div>
-                ) : (
+                )}
+                {deployState === "done" && (
                   <div className="flex items-center gap-2">
                     <CheckCircle2 className="h-4 w-4 shrink-0" />
                     <p className="flex-1 font-medium">
-                      Vorschau wurde neu geladen.
+                      🟢 Fertig! Ihre Website ist jetzt weltweit aktualisiert.
                     </p>
                     <button
                       onClick={() => setDeployState("idle")}
@@ -773,6 +800,8 @@ export function EditorClient({
               />
             ) : (
               <>
+                {/* Hinweis- & Urlaubsbanner (Schalter + Stil + Text, direkt über der Liste) */}
+                {!manifestError && <BannerCard values={values} onChange={handleChange} />}
                 {/* Suche + Akkordeon-Steuerung */}
                 {!manifestError && sections.length > 0 && (
                   <div className="mb-5 space-y-3">
@@ -1018,7 +1047,7 @@ export function EditorClient({
               </button>
             </div>
             <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
-              {changedFields.length === 0 && codeDraftFiles.length === 0 && (
+              {changedFields.length === 0 && changedFreeDrafts.length === 0 && codeDraftFiles.length === 0 && (
                 <p className="py-6 text-center text-sm text-zinc-500">
                   Keine ausstehenden Änderungen.
                 </p>
@@ -1044,6 +1073,25 @@ export function EditorClient({
                   </div>
                 );
               })}
+              {changedFreeDrafts.map((entry) => (
+                <div key={entry.id} className="rounded-xl border border-zinc-200 p-3">
+                  <p className="text-xs font-semibold text-zinc-900">{entry.label}</p>
+                  <p className="mt-1.5 break-words text-xs text-zinc-400">
+                    <span className="font-medium">Live: </span>
+                    <span className="rounded bg-red-50 px-1 text-red-700 line-through">
+                      {entry.oldValue === "" ? "(leer)" : entry.oldValue.slice(0, 300)}
+                    </span>
+                  </p>
+                  <p className="mt-1 break-words text-xs text-zinc-600">
+                    <span className="font-medium">Neu: </span>
+                    <span className="rounded bg-emerald-50 px-1 text-emerald-800">
+                      {entry.newValue == null || entry.newValue === ""
+                        ? "(Entwurf gespeichert)"
+                        : entry.newValue.slice(0, 300)}
+                    </span>
+                  </p>
+                </div>
+              ))}
               {codeDraftFiles.length > 0 && (
                 <div className="rounded-xl border border-violet-200 bg-violet-50/50 p-3">
                   <p className="text-xs font-semibold text-violet-900">
@@ -1182,6 +1230,95 @@ function UndoButton({ onUndo }: { onUndo: () => void }) {
     >
       <RotateCcw className="h-3.5 w-3.5" />
     </button>
+  );
+}
+
+const BANNER_FILE = "src/content/site.json";
+const BANNER_ENABLED_ID = `json:${BANNER_FILE}:site.banner.enabled`;
+const BANNER_VARIANT_ID = `json:${BANNER_FILE}:site.banner.variant`;
+const BANNER_TEXT_ID = `json:${BANNER_FILE}:site.banner.text`;
+
+const BANNER_VARIANTS = [
+  { id: "vacation", label: "🟡 Betriebsurlaub", pill: "bg-amber-500 text-white border-amber-500" },
+  { id: "emergency", label: "🔴 Dringend / Notfall", pill: "bg-red-500 text-white border-red-500" },
+  { id: "info", label: "🔵 Information", pill: "bg-blue-500 text-white border-blue-500" },
+] as const;
+
+/** Hinweis- & Urlaubsbanner: Schalter, Stil und Text – schreibt direkt Entwürfe. */
+function BannerCard({
+  values,
+  onChange,
+}: {
+  values: DraftMap;
+  onChange: (fieldId: string, value: string) => void;
+}) {
+  const enabled = (values[BANNER_ENABLED_ID] ?? "") === "true";
+  const variant = values[BANNER_VARIANT_ID] ?? "vacation";
+  const text = values[BANNER_TEXT_ID] ?? "";
+
+  return (
+    <div className="mb-4 rounded-2xl border border-zinc-200 bg-zinc-50/50 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm font-semibold text-zinc-900">
+          Hinweisbanner auf der Website anzeigen
+        </p>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          onClick={() => onChange(BANNER_ENABLED_ID, enabled ? "false" : "true")}
+          className={`relative h-6 w-11 shrink-0 rounded-full transition ${
+            enabled ? "bg-emerald-500" : "bg-zinc-300"
+          }`}
+        >
+          <span
+            className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
+              enabled ? "left-[22px]" : "left-0.5"
+            }`}
+          />
+        </button>
+      </div>
+      <p className={`mt-0.5 text-xs font-medium ${enabled ? "text-emerald-700" : "text-zinc-400"}`}>
+        {enabled ? "AN" : "AUS"}
+      </p>
+
+      {enabled && (
+        <div className="mt-3 space-y-3">
+          <div className="flex flex-wrap gap-2">
+            {BANNER_VARIANTS.map((v) => {
+              const active = variant === v.id;
+              return (
+                <button
+                  key={v.id}
+                  type="button"
+                  onClick={() => onChange(BANNER_VARIANT_ID, v.id)}
+                  className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                    active
+                      ? v.pill
+                      : "border-zinc-300 bg-white text-zinc-600 hover:bg-zinc-100"
+                  }`}
+                >
+                  {v.label}
+                </button>
+              );
+            })}
+          </div>
+          <div>
+            <input
+              type="text"
+              value={text}
+              maxLength={160}
+              onChange={(e) => onChange(BANNER_TEXT_ID, e.target.value)}
+              placeholder="Wir sind vom 01. bis 15. August im Betriebsurlaub."
+              className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10"
+            />
+            <p className="mt-1 text-right text-xs text-zinc-400">
+              {text.length} / 160 Zeichen
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

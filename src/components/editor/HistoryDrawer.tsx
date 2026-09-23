@@ -26,7 +26,7 @@ function formatDate(iso: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
-  return `${day}, ${time} Uhr`;
+  return `Version vom ${day}, ${time} Uhr`;
 }
 
 export function HistoryDrawer({
@@ -165,10 +165,7 @@ export function HistoryDrawer({
                   )}
                 </div>
                 <p className="mt-0.5 text-xs text-zinc-500">
-                  {entry.commit_sha && (
-                    <>Commit <code>{entry.commit_sha.slice(0, 7)}</code>{" · "}</>
-                  )}
-                  {files.length} Datei(en)
+                  {files.length} Datei(en) bei dieser Version
                 </p>
                 {files.length > 0 && (
                   <ul className="mt-2 space-y-0.5">

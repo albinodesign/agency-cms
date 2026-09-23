@@ -100,7 +100,7 @@ export function BlogEditorModal({
     }
     const finalSlug = slugify(slug || title);
     if (!finalSlug) {
-      onError("Der Slug ist ungültig.");
+      onError("Die Webadresse ist ungültig.");
       return;
     }
 
@@ -181,7 +181,7 @@ export function BlogEditorModal({
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="mb-1.5 block text-sm font-medium text-zinc-700">
-                Slug
+                Webadresse / Link
               </label>
               <input
                 type="text"

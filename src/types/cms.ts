@@ -20,6 +20,8 @@ export interface ManifestField {
   placeholder?: string;
   /** Optionale Zeichenbegrenzung für den Zeichenzähler */
   maxLength?: number;
+  /** Optionales Bildformat aus dem Manifest, z. B. "16:9", "1:1", "4:3" */
+  aspectRatio?: string;
 }
 
 export interface ManifestSection {

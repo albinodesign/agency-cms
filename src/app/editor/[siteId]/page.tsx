@@ -114,6 +114,39 @@ export default async function EditorPage({ params }: EditorPageProps) {
         ", "
       )}. Betroffene Felder sind leer.`;
     }
+
+    // Banner-Schnellschalter: Live-Werte aus site.json seeden (auch ohne Manifest-Felder),
+    // damit Schalter, Undo und Diff von Anfang an den echten Stand zeigen
+    try {
+      const bannerOctokit = createOctokit();
+      const { text: siteText } = await getRepoFile(
+        bannerOctokit,
+        typedSite.repo_owner,
+        typedSite.repo_name,
+        "src/content/site.json"
+      );
+      const banner = (JSON.parse(siteText) as Record<string, unknown>)?.site as Record<
+        string,
+        unknown
+      > | null;
+      const bannerData =
+        banner && typeof banner.banner === "object" && banner.banner !== null
+          ? (banner.banner as Record<string, unknown>)
+          : null;
+      if (bannerData) {
+        if (typeof bannerData.enabled === "boolean") {
+          liveValues["json:src/content/site.json:site.banner.enabled"] = String(bannerData.enabled);
+        }
+        if (typeof bannerData.variant === "string") {
+          liveValues["json:src/content/site.json:site.banner.variant"] = bannerData.variant;
+        }
+        if (typeof bannerData.text === "string") {
+          liveValues["json:src/content/site.json:site.banner.text"] = bannerData.text;
+        }
+      }
+    } catch {
+      // Kein Banner in site.json – Schalter startet neutral (aus/leer)
+    }
   } catch (err) {
     manifestError =
       err instanceof Error
