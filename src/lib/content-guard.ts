@@ -15,7 +15,7 @@
  * Gültigkeits-Check). Diese Datei deckt nur normale Inhaltsziele ab.
  */
 import { getByPath, getBySegments, parsePathSafe } from "./json-path";
-import type { CmsManifest, FieldType } from "../types/cms";
+import type { CmsManifest, FieldType, ManifestField } from "../types/cms";
 import { FREE_DRAFT_PREFIX } from "../types/cms";
 
 /** Die Feldliste selbst ist niemals ein normales Feldziel. */
@@ -241,6 +241,40 @@ export const BANNER_VARIANTS = ["vacation", "emergency", "info"] as const;
 /** Maximale Banner-Textlänge (muss zum Website-Layout passen). */
 export const BANNER_TEXT_MAX = 160;
 
+/** Prüft einen Banner-Wert – gilt beim Anlegen UND auf vorhandenen Pfaden. */
+export function validateBannerValue(key: string, value: string): string | null {
+  const trimmed = value.trim();
+  if (key === "enabled") {
+    if (trimmed !== "true" && trimmed !== "false") {
+      return `Banner-Schalter braucht "true" oder "false" (erhalten: "${value.slice(0, 40)}").`;
+    }
+    return null;
+  }
+  if (key === "variant") {
+    if (!(BANNER_VARIANTS as readonly string[]).includes(trimmed)) {
+      return `Banner-Stil muss einer von ${BANNER_VARIANTS.join(", ")} sein.`;
+    }
+    return null;
+  }
+  if (key === "text") {
+    if (value.length > BANNER_TEXT_MAX) {
+      return `Banner-Text ist zu lang (${value.length} von max. ${BANNER_TEXT_MAX} Zeichen).`;
+    }
+    return null;
+  }
+  return `Unbekanntes Banner-Feld "${key}" (erlaubt: enabled, variant, text).`;
+}
+
+/** Zieltyp eines Banner-Pfads (für einheitliche Validierung/Umwandlung). */
+export function bannerTargetType(key: string): FieldType {
+  return key === "enabled" ? "boolean" : "text";
+}
+
+/** Maximale Länge eines Banner-Pfads (nur Text hat eine). */
+export function bannerMaxLength(key: string): number | undefined {
+  return key === "text" ? BANNER_TEXT_MAX : undefined;
+}
+
 /** Generelle Wert-Obergrenze für freie Entwürfe (wie im KI-Werkzeug). */
 export const FREE_VALUE_MAX = 20_000;
 
@@ -254,7 +288,7 @@ export type FreeClassify =
   | { ok: true; creation: FreeCreation | null; canonical: string }
   | { ok: false; error: string };
 
-function isPlainObject(node: unknown): node is Record<string, unknown> {
+export function isPlainObject(node: unknown): node is Record<string, unknown> {
   return typeof node === "object" && node !== null && !Array.isArray(node);
 }
 
@@ -283,37 +317,30 @@ export function classifyFreeTarget(
   const segments = parsed.segments;
   const canonical = `${file}#${parsed.canonical}`;
 
+  // Banner-Werte gelten immer – auch auf bereits vorhandenen Pfaden.
+  // So kann z. B. variant="party" nicht durchschlüpfen, nur weil der Pfad existiert.
+  const bannerKey =
+    file === SITE_JSON &&
+    segments.length === 2 &&
+    segments[0] === "banner" &&
+    typeof segments[1] === "string"
+      ? segments[1]
+      : null;
+  if (bannerKey) {
+    const bannerProblem = validateBannerValue(bannerKey, value);
+    if (bannerProblem) return { ok: false, error: bannerProblem };
+  }
+
   if (fileJson && getBySegments(fileJson, segments) !== undefined) {
     return { ok: true, creation: null, canonical };
   }
 
   // Ausnahme 1: Banner-Modell (Besitzer: CMS-Banner-Schalter).
-  if (
-    file === SITE_JSON &&
-    segments.length === 2 &&
-    segments[0] === "banner" &&
-    typeof segments[1] === "string"
-  ) {
-    const key = segments[1];
+  // Der Wert wurde oben bereits geprüft – hier nur noch die Struktur.
+  if (bannerKey) {
     const existing = fileJson?.banner;
     if (existing !== undefined && !isPlainObject(existing)) {
       return { ok: false, error: `Der Schlüssel "banner" in ${SITE_JSON} ist kein Objekt – Banner kann nicht angelegt werden.` };
-    }
-    const trimmed = value.trim();
-    if (key === "enabled") {
-      if (trimmed !== "true" && trimmed !== "false") {
-        return { ok: false, error: `Banner-Schalter braucht "true" oder "false" (erhalten: "${value.slice(0, 40)}").` };
-      }
-    } else if (key === "variant") {
-      if (!(BANNER_VARIANTS as readonly string[]).includes(trimmed)) {
-        return { ok: false, error: `Banner-Stil muss einer von ${BANNER_VARIANTS.join(", ")} sein.` };
-      }
-    } else if (key === "text") {
-      if (value.length > BANNER_TEXT_MAX) {
-        return { ok: false, error: `Banner-Text ist zu lang (${value.length} von max. ${BANNER_TEXT_MAX} Zeichen).` };
-      }
-    } else {
-      return { ok: false, error: `Unbekanntes Banner-Feld "${key}" (erlaubt: enabled, variant, text).` };
     }
     return { ok: true, creation: { kind: "banner", file, canonical }, canonical };
   }
@@ -436,4 +463,62 @@ export function validateFullJsonDraft(text: string): string | null {
 /** Stellt sicher, dass ein Manifest-Objekt keine leere Feldliste versteckt. */
 export function manifestHasFields(manifest: CmsManifest): boolean {
   return manifest.sections.some((s) => s.fields.length > 0);
+}
+
+/** Aufgelöster Zieltyp: Manifestfeld, Banner-Regel oder freier Text. */
+export interface ResolvedTarget {
+  type: FieldType;
+  maxLength?: number;
+  label: string;
+  via: "manifest" | "banner" | "frei";
+}
+
+/**
+ * Löst den Typ eines Inhaltsziels einheitlich auf – unabhängig vom
+ * Zugriffsweg (Manifestfeld oder freier Alias). Ein freier Alias auf ein
+ * deklariertes Manifestziel erbt dessen Typ, maxLength und Label. So kann
+ * z. B. kein Alias die Längenbegrenzung umgehen und Zahlen werden auch über
+ * Alias als Zahlen gespeichert.
+ */
+export function resolveTargetType(
+  canonical: string,
+  manifestByCanonical: Map<string, ManifestField>,
+  file: string,
+  segments: Array<string | number>
+): ResolvedTarget {
+  const declared = manifestByCanonical.get(canonical);
+  if (declared) {
+    return { type: declared.type, maxLength: declared.maxLength, label: declared.label, via: "manifest" };
+  }
+  if (
+    file === SITE_JSON &&
+    segments.length === 2 &&
+    segments[0] === "banner" &&
+    typeof segments[1] === "string"
+  ) {
+    const key = segments[1];
+    return {
+      type: bannerTargetType(key),
+      maxLength: bannerMaxLength(key),
+      label: `Banner-${key}`,
+      via: "banner",
+    };
+  }
+  const leaf = segments[segments.length - 1];
+  return { type: "text", label: String(leaf), via: "frei" };
+}
+
+/**
+ * Erforderliche Schlüssel eines Listen-Elements: Schnittmenge der Schlüssel
+ * aller vorhandenen Objekt-Elemente. Neue Elemente müssen diese enthalten,
+ * damit sie zum Website-Modell passen (z. B. quote+author+location+rating).
+ * Leere oder uneinheitliche Listen liefern [] (Modell unbekannt).
+ */
+export function inferRequiredKeys(list: unknown): string[] {
+  if (!Array.isArray(list)) return [];
+  const objects = list.filter(isPlainObject);
+  if (objects.length === 0 || objects.length !== list.length) return [];
+  const [first, ...rest] = objects;
+  const keys = Object.keys(first).filter((k) => !["__proto__", "constructor", "prototype"].includes(k));
+  return keys.filter((k) => rest.every((o) => Object.prototype.hasOwnProperty.call(o, k)));
 }

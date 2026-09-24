@@ -1,31 +1,11 @@
 import { NextResponse } from "next/server";
-import { streamText, tool, stepCountIs, convertToModelMessages } from "ai";
+import { streamText, stepCountIs, convertToModelMessages } from "ai";
 import type { UIMessage } from "ai";
-import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { createOctokit, getManifestRaw, getRepoFile, normalizeManifest } from "@/lib/github";
-import { validateDraftValue } from "@/lib/validate";
-import {
-  AI_MAX_FILE_CHARS,
-  AI_MAX_STEPS,
-  MANIFEST_PATH,
-  AiFieldContext,
-  breaksBridge,
-  buildSystemPrompt,
-  findsSecret,
-  getAiModel,
-  getAiModelId,
-  isAllowedCodePath,
-  isAllowedContentPath,
-  validateManifestText,
-} from "@/lib/ai";
-import {
-  SUPPORTED_FIELD_TYPES,
-  isAllowedFieldJsonFile,
-  validateJsonPath,
-} from "@/lib/content-guard";
-import type { FieldType, Site } from "@/types/cms";
-import { FREE_DRAFT_PREFIX } from "@/types/cms";
+import { AI_MAX_STEPS, AiFieldContext, buildSystemPrompt, getAiModel, getAiModelId } from "@/lib/ai";
+import { buildAiTools } from "@/lib/ai-tools";
+import type { Site } from "@/types/cms";
 
 /** Ordnet einen OpenRouter-Fehler auf eine deutsche Kunden-Meldung zu. */
 function mapAiError(err: unknown): { message: string; status: number } {
@@ -180,7 +160,7 @@ export async function POST(request: Request) {
     const loaded = await getManifestRaw(octo(), site.repo_owner, site.repo_name);
     const serverManifest = normalizeManifest(loaded.parsed);
     serverFields = serverManifest.sections.flatMap((s) =>
-      s.fields.map((f) => ({ id: f.id, label: f.label, type: f.type, file: f.file, path: f.path }))
+      s.fields.map((f) => ({ id: f.id, label: f.label, type: f.type, file: f.file, path: f.path, maxLength: f.maxLength }))
     );
   } catch (err) {
     return NextResponse.json(
@@ -206,7 +186,7 @@ export async function POST(request: Request) {
     }
   }
   let system = buildSystemPrompt(site.name, serverFields, values);
-  system += `\n\nHinweis zur Feldliste: Aus Platzgründen stehen oben ggf. nicht alle Felder. Die Liste ist dann unvollständig markiert – die VOLLSTÄNDIGE Liste erhältst du jederzeit über das Werkzeug "listeFelder", volle Datei-Inhalte über "leseDatei" oder "projektUebersicht". Rate niemals Pfade, lade sie nach.`;
+  system += `\n\nHinweis zur Feldliste: Aus Platzgründen stehen oben ggf. nicht alle Felder. Die Liste ist dann unvollständig markiert – die VOLLSTÄNDIGE Liste erhältst du jederzeit über das Werkzeug "listeFelder" (alle IDs, ungekürzt), einzelne Werte über "leseFeld" (vollständig, auch weit hinten in großen Dateien) und Datei-Ausschnitte über "leseDatei" (Paging: gekuerzt=true bedeutet mit abZeichen=weiterAb fortsetzen) oder "projektUebersicht". Rate niemals Pfade, lade sie nach. Unvollständige Ergänzungen (hinweis der Werkzeuge) gibst du dem Kunden ehrlich weiter – erst vollständig veröffentlichen.`;
   if (hochgeladen.length > 0) {
     const liste = hochgeladen
       .map((d) => `- ${d.name ?? "Datei"} (${d.mediaType ?? "unbekannt"}): ${d.url}`)
@@ -221,166 +201,49 @@ export async function POST(request: Request) {
     content: { text: userContent, dateien: hochgeladen },
   });
 
-  // Serverseitiger Such-/Nachladeweg: vollständige Server-Feldliste für
-  // alle Werkzeuge (listeFelder, schreibeInhalt). Der Client schickt weiter
-  // aktuelle Werte (values) als Kontext – entscheidend ist die Server-Liste.
-  const fieldMap = new Map(serverFields.map((f) => [f.id, f]));
-
-  async function upsertDraft(fieldId: string, value: string) {
-    return supabase
-      .from("drafts")
-      .upsert({ site_id: siteId, field_id: fieldId, value }, { onConflict: "site_id,field_id" });
-  }
-
-  const tools = {
-    projektUebersicht: tool({
-      description: "Liefert eine kompakte Liste aller Komponenten, Seiten und Inhaltsdateien im Website-Repository. Nutze dies ZUERST, um Dateipfade zu finden, bevor du Dateien liest.",
-      inputSchema: z.object({}),
-      execute: async () => {
-        try {
-          const { data } = await octo().git.getTree({
-            owner: site.repo_owner,
-            repo: site.repo_name,
-            tree_sha: "main",
-            recursive: "true",
-          });
-          const relevantFiles = (data.tree ?? [])
-            .map((item) => item.path ?? "")
-            .filter((p) => p.startsWith("src/") && (p.endsWith(".astro") || p.endsWith(".json") || p.endsWith(".md") || p.endsWith(".css")));
-          return { dateien: relevantFiles };
-        } catch (err) {
-          return { fehler: `Projektübersicht konnte nicht geladen werden: ${err instanceof Error ? err.message : "unbekannt"}` };
-        }
+  // Werkzeuge aus dem testbaren Modul (dieselben Regeln wie im Publish).
+  const tools = buildAiTools({
+    site: { id: siteId, repo_owner: site.repo_owner, repo_name: site.repo_name },
+    serverFields,
+    store: {
+      storeDraft: async (sid, fieldId, value) => {
+        const { error } = await supabase
+          .from("drafts")
+          .upsert({ site_id: sid, field_id: fieldId, value }, { onConflict: "site_id,field_id" });
+        return { error: error ? { message: error.message } : null };
       },
-    }),
-    listeFelder: tool({
-      description: "Listet ALLE bearbeitbaren Felder der Website (ID, Name, Typ) – serverseitig, immer vollständig, auch wenn der Prompt gekürzt war.",
-      inputSchema: z.object({}),
-      execute: async () => ({
-        felder: serverFields.map((f) => ({ id: f.id, name: f.label, typ: f.type })),
-      }),
-    }),
-    leseDatei: tool({
-      description: "Liest eine Website-Datei (Inhalt oder Code). Nur erlaubte Dateien.",
-      inputSchema: z.object({ datei: z.string().describe("Dateipfad im Repo, z. B. src/content/pages/home.json") }),
-      execute: async ({ datei }) => {
-        if (!isAllowedContentPath(datei) && !isAllowedCodePath(datei)) {
-          return { fehler: `Die Datei "${datei}" darfst du nicht öffnen (Tabu-Bereich).` };
-        }
-        try {
-          const file = await getRepoFile(octo(), site.repo_owner, site.repo_name, datei);
-          return { datei, inhalt: file.text.slice(0, AI_MAX_FILE_CHARS) };
-        } catch (err) {
-          return { fehler: `Die Datei "${datei}" konnte nicht gelesen werden: ${err instanceof Error ? err.message : "unbekannt"}` };
-        }
-      },
-    }),
-    schreibeInhalt: tool({
-      description: "Ändert einen Inhalt als Entwurf (geht NICHT live, nur Vorbereitung). Entweder feldId ODER datei+pfad angeben.",
-      inputSchema: z.object({
-        feldId: z.string().optional().describe("Feld-ID aus der Feldliste, z. B. hero.title"),
-        datei: z.string().optional().describe("Nur ohne feldId: Zieldatei, z. B. src/content/pages/home.json"),
-        pfad: z.string().optional().describe("Nur ohne feldId: Pfad in der Datei, z. B. hero.title oder faq.eintraege[0].frage"),
-        wert: z.string().describe("Der neue Text"),
-      }),
-      execute: async ({ feldId, datei, pfad, wert }) => {
-        if (typeof wert !== "string" || wert.length > 20_000) {
-          return { fehler: "Der Text ist zu lang (max. 20.000 Zeichen). Bitte kürzen." };
-        }
-        if (feldId) {
-          const field = fieldMap.get(feldId);
-          if (!field) return { fehler: `Das Feld "${feldId}" gibt es nicht.` };
-          // Typ aus dem (Client-)Kontext nur nach Prüfung nutzen – der
-          // Publish prüft später gegen das Server-Manifest (entscheidend).
-          const fieldType = (field as { type?: unknown }).type;
-          const safeType: FieldType = SUPPORTED_FIELD_TYPES.includes(fieldType as FieldType)
-            ? (fieldType as FieldType)
-            : "text";
-          const problem = validateDraftValue(safeType, wert, undefined);
-          if (problem) return { fehler: `${field.label}: ${problem}` };
-          const { error } = await upsertDraft(feldId, wert);
-          if (error) return { fehler: `Entwurf konnte nicht gespeichert werden: ${error.message}` };
-          return { art: "feld", feldId, wert, vorschau: "sofort", meldung: `"${field.label}" als Entwurf gespeichert, Kunde sieht es sofort in der Vorschau.` };
-        }
-        if (datei && pfad) {
-          // Gleiche Dateisperre + Pfad-Sicherheit wie im Publish (Fail-Closed).
-          if (!isAllowedFieldJsonFile(datei)) {
-            return { fehler: `Die Datei "${datei}" ist kein erlaubtes Inhaltsziel (erlaubt: src/content/site.json und JSON-Dateien unter src/content/pages/).` };
-          }
-          const pathProblem = validateJsonPath(pfad);
-          if (pathProblem) {
-            return { fehler: `Der Pfad "${pfad}" ist ungültig: ${pathProblem}` };
-          }
-          const freeId = `${FREE_DRAFT_PREFIX}${datei}:${pfad}`;
-          const { error } = await upsertDraft(freeId, wert);
-          if (error) return { fehler: `Entwurf konnte nicht gespeichert werden: ${error.message}` };
-          return { art: "frei", feldId: freeId, vorschau: "nach Veröffentlichen", meldung: `Entwurf für ${datei} (${pfad}) gespeichert, sichtbar nach dem Veröffentlichen.` };
-        }
-        return { fehler: "Bitte feldId oder datei+pfad angeben." };
-      },
-    }),
-    schreibeCode: tool({
-      description: "Ändert eine Design-/Code-Datei als Entwurf (geht NICHT live). Ganzen neuen Datei-Inhalt übergeben.",
-      inputSchema: z.object({
-        datei: z.string().describe("Dateipfad, z. B. src/components/Header.astro"),
-        inhalt: z.string().describe("Der komplette neue Datei-Inhalt"),
-      }),
-      execute: async ({ datei, inhalt }) => {
-        if (!isAllowedCodePath(datei)) {
-          return { fehler: `Die Datei "${datei}" darfst du nicht ändern (Tabu-Bereich: Einstellungen, Pakete, Feldliste).` };
-        }
-        if (inhalt.length > AI_MAX_FILE_CHARS) {
-          return { fehler: "Die Datei ist zu groß. Bitte in kleinere Schritte aufteilen." };
-        }
-        if (findsSecret(inhalt)) {
-          return { fehler: "Der Inhalt sieht nach Schlüssel oder Passwort aus. So etwas gehört niemals in Dateien." };
-        }
-        try {
-          const file = await getRepoFile(octo(), site.repo_owner, site.repo_name, datei);
-          const original = file.text;
-          if (breaksBridge(original, inhalt)) {
-            return { fehler: "Der neue Inhalt würde die CMS-Vorschau-Brücke entfernen. Die muss bleiben – bitte Version mit Brücke einreichen." };
-          }
-        } catch (err) {
-          return { fehler: `Original-Datei konnte nicht gelesen werden: ${err instanceof Error ? err.message : "unbekannt"}` };
-        }
+      storeCodeDraft: async (sid, filePath, content) => {
         const { error } = await supabase
           .from("code_drafts")
-          .upsert({ site_id: siteId, file_path: datei, content: inhalt }, { onConflict: "site_id,file_path" });
-        if (error) return { fehler: `Entwurf konnte nicht gespeichert werden: ${error.message}` };
-        return { art: "code", datei, vorschau: "nach Veröffentlichen", meldung: `Design-Entwurf für ${datei} gespeichert, sichtbar nach dem Veröffentlichen.` };
+          .upsert({ site_id: sid, file_path: filePath, content }, { onConflict: "site_id,file_path" });
+        return { error: error ? { message: error.message } : null };
       },
-    }),
-    schreibeFeldliste: tool({
-      description: "Erweitert die Feldliste des Editors (nur wenn der Kunde wirklich neue Inhalte will). Ganzen neuen JSON-Inhalt übergeben.",
-      inputSchema: z.object({ inhalt: z.string().describe("Der komplette neue Inhalt von src/content/cms.manifest.json") }),
-      execute: async ({ inhalt }) => {
-        const problem = validateManifestText(inhalt);
-        if (problem) return { fehler: problem };
-        const { error } = await supabase
-          .from("code_drafts")
-          .upsert({ site_id: siteId, file_path: MANIFEST_PATH, content: inhalt }, { onConflict: "site_id,file_path" });
-        if (error) return { fehler: `Entwurf konnte nicht gespeichert werden: ${error.message}` };
-        return { art: "manifest", datei: MANIFEST_PATH, vorschau: "nach Veröffentlichen", meldung: "Feldlisten-Entwurf gespeichert, aktiv nach dem Veröffentlichen." };
+      listDrafts: async (sid) => {
+        const { data } = await supabase.from("drafts").select("field_id,value").eq("site_id", sid);
+        return (data ?? []) as Array<{ field_id: string; value: string }>;
       },
-    }),
-    leseBilder: tool({
-      description: "Listet bereits hochgeladene Bilder (zum Wiederverwenden statt neu hochladen).",
-      inputSchema: z.object({}),
-      execute: async () => {
-        try {
-          const { data, error } = await supabase.storage.from("cms-media").list(`sites/${siteId}`, { limit: 30 });
-          if (error) return { bilder: [], meldung: "Keine Bilder gefunden – Kunde muss erst welche hochladen." };
-          const urls = (data ?? [])
-            .filter((f) => f.name && !f.name.startsWith("."))
-            .map((f) => supabase.storage.from("cms-media").getPublicUrl(`sites/${siteId}/${f.name}`).data.publicUrl);
-          return { bilder: urls };
-        } catch {
-          return { bilder: [], meldung: "Bilder konnten nicht geladen werden." };
-        }
+      listImages: async (sid) => {
+        const { data, error } = await supabase.storage.from("cms-media").list(`sites/${sid}`, { limit: 30 });
+        if (error || !data) return [];
+        return data
+          .filter((f) => f.name && !f.name.startsWith("."))
+          .map((f) => supabase.storage.from("cms-media").getPublicUrl(`sites/${sid}/${f.name}`).data.publicUrl);
       },
-    }),
-  };
+    },
+    repo: {
+      readFile: async (owner, repoName, filePath) =>
+        (await getRepoFile(octo(), owner, repoName, filePath)).text,
+      listTree: async (owner, repoName) => {
+        const { data } = await octo().git.getTree({
+          owner,
+          repo: repoName,
+          tree_sha: "main",
+          recursive: "true",
+        });
+        return (data.tree ?? []).map((item) => item.path ?? "");
+      },
+    },
+  });
 
   let model;
   try {

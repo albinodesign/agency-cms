@@ -99,6 +99,8 @@ export interface AiFieldContext {
   type: string;
   file: string;
   path: string;
+  /** Zeichenbegrenzung aus dem Manifest (gegen stillen Verlust im Chat). */
+  maxLength?: number;
 }
 
 export function buildSystemPrompt(

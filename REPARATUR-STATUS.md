@@ -140,3 +140,63 @@ ersten Commit – nicht als gelöst bezeichnen).
 - `npm run build` → erfolgreich (alle 13 Seiten).
 - `npm run test` → `test:reparatur1`: 32/32 bestanden; `test:reparatur1b`:
   40/40 bestanden (12 Regel-Tests + 28 Publish-Szenario-Assertions S1–S9).
+- Hinweis (durch 1c überholt): Die 1b-Aussagen „Listen-Ergänzung am Ende“ und
+  „Vorabprüfung gegen Live-Dateien“ galten nur vorläufig – seit 1c gilt:
+  Ergänzungen nur modellvollständig/typgerecht, Prüfung gegen den Kandidaten
+  mit effektivem Manifest (Details unten).
+
+---
+
+## Schritt 1c – Einheitliche Zielregeln, Kandidaten-Prüfung, Chat-Anbindung, Alias-Aufräumen, große Bestände (Branch: `reparatur-1-content-guard`)
+
+### Einheitliche Regeln für dasselbe Inhaltsziel (behoben)
+Ein Manifestfeld und ein freier Alias desselben normalisierten Ziels nutzen
+jetzt dieselbe Auflösung (`resolveTargetType`): Der Alias erbt Typ, maxLength
+und Label des deklarierten Felds; Banner-Pfade folgen den Banner-Regeln;
+sonst gilt Text. Umwandlung nur noch zieltypabhängig (`convertStoredValue`):
+„true“ bleibt in Textfeldern Text, wird in Boolean-Feldern Boolean; „19,90“
+wird auf Zahlfeldern (auch per Alias) zur Zahl 19.9. Banner-Werte gelten auf
+vorhandenen Pfaden genauso wie beim Anlegen (z. B. `variant="party"` und
+Überlängen werden überall abgelehnt). Belegt durch U1–U10 und R-U1–R-U4.
+
+### Kandidat wird vor dem ersten Write vollständig geprüft (behoben)
+Der Publish baut zuerst den gesamten Kandidaten (Live + Voll-Datei-Entwürfe +
+alle Feldänderungen) und prüft erst diesen: effektives Manifest (ein
+Manifest-Entwurf im Satz ersetzt die Live-Definition) streng gegen den
+Kandidaten – so fallen `{}`-Voll-Dateien (Ziele entfallen) und
+Manifest-Entwürfe mit `package.json`-Ziel auf. Werte je deklariertem Typ
+einheitlich für Feld-, Alias- und Voll-Datei-Inhalte. Banner-Dreifaltigkeit
+(an braucht Stil + Text). Listen-Ergänzungen brauchen alle Pflichtschlüssel
+der Geschwister in typgerechter Form (Geschwistertyp-Übernahme, z. B. rating
+als Zahl), keine fremden Schlüssel, keine Löcher, keine Tiefe; leere oder
+uneinheitliche Listen lehnen Ergänzungen ehrlich ab (keine globale
+Demo-Regel, keine MODEL-Hardcodes – das Demo-Modell steckt nur in der
+Test-Fixture). Zusammengehörige Manifest- und Inhaltsänderungen im selben
+Satz bleiben möglich. Belegt durch R-R1–R-R4 mit der unverfälschten
+testimonials-Fixture aus der Demo-Website.
+
+### Chat und Publish abgestimmt (behoben)
+Die KI-Werkzeuge leben jetzt in `src/lib/ai-tools.ts` (`buildAiTools`, echte
+Funktionen, lokale Adapter testbar). `schreibeInhalt` nutzt die gemeinsame
+Prüfung gegen Live-Stand plus gespeicherte Entwürfe (zusammengehörige
+Änderungen): Unzulässiges (z. B. `hero.neu`) wird mit Fehler abgelehnt statt
+still gespeichert; unvollständige Ergänzungen werden mit ehrlichem `hinweis`
+(fehlende Schlüssel) gespeichert, aber erst vollständig veröffentlichbar.
+`maxLength` steht jetzt in `AiFieldContext` und wird im Werkzeug geprüft.
+`leseDatei` seitenweise mit `gekuerzt`/`weiterAb`-Kennzeichnung, neu
+`leseFeld` für einzelne volle Feldwerte, `listeFelder` weiter ungekürzt (500
+IDs belegt). Der Prompt erklärt Kürzung + Nachladeweg. Belegt durch P-P1/P-P2.
+
+### Alias-Abschluss (behoben)
+Gleiche Werte (Manifest + Alias) veröffentlichen erfolgreich, und der erfüllte
+Alias wird danach aufgeräumt – aber nur nach Wert-Rückprüfung (kein
+Pauschal-Löschen). Verschiedene Werte bleiben ein 400-Konflikt. Belegt durch
+R-R5 (und S8 aus 1b). Grenze: parallele Veröffentlichungen bleiben ein
+eigenes Thema.
+
+### Tests 1c und Ergebnisse (lokal ausgeführt)
+- `npm run lint` → sauber (0 Fehler, 0 Warnungen).
+- `npm run build` → erfolgreich (alle 13 Seiten).
+- `npm run test` → 32/32 (1) + 40/40 (1b) + 40/40 (1c: 13 Regel-, 17
+  Routen-, 10 Werkzeug-Assertions). Exit-Code-Weitergabe per Absicht-Fehler
+  bewiesen (1 → Fehler, 0 → sauber).

@@ -86,7 +86,7 @@ export function ChatDrawer({
           siteId,
           conversationId: convRef.current,
           context: {
-            fields: fields.map((f) => ({ id: f.id, label: f.label, type: f.type, file: f.file, path: f.path })),
+            fields: fields.map((f) => ({ id: f.id, label: f.label, type: f.type, file: f.file, path: f.path, maxLength: f.maxLength })),
             values,
           },
         };

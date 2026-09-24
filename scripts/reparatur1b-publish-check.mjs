@@ -32,6 +32,7 @@ let failed = 0;
 function ok(condition, name) {
   if (!condition) {
     failed += 1;
+    process.exitCode = 1;
     console.error(`FEHLGESCHLAGEN: ${name}`);
   } else {
     passed += 1;

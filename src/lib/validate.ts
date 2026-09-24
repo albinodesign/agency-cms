@@ -1,16 +1,49 @@
 import type { FieldType } from "@/types/cms";
 
+const NUM_RE = /^[-+]?\d+([.,]\d+)?$/;
+
+/** Beschreibt einen gefundenen Nicht-String-Wert für Fehlermeldungen. */
+function kindOf(value: unknown): string {
+  if (Array.isArray(value)) return "Liste";
+  if (value === null) return "leer";
+  switch (typeof value) {
+    case "number":
+      return "Zahl";
+    case "boolean":
+      return "An/Aus";
+    case "object":
+      return "Objekt";
+    default:
+      return typeof value;
+  }
+}
+
 /**
- * Prüft einen Entwurfswert gegen den Feldtyp aus dem Manifest.
- * Liefert null wenn ok, sonst eine deutsche Fehlermeldung für den Kunden.
- * Leere Werte sind erlaubt (Feld leeren) – Pflichtfelder kennt das Manifest nicht.
+ * Prüft einen bereits vorliegenden JSON-Wert (String, Zahl, Boolean …)
+ * gegen den Feldtyp. Leere Werte (null, undefined, Leertext) sind ok
+ * (Feld leeren) – Pflichtfelder kennt das Manifest nicht.
  * Wird vom Veröffentlichen UND vom KI-Chat benutzt (eine Prüfung für alles).
  */
-export function validateDraftValue(
+export function validateJsonValue(
   type: FieldType,
-  value: string,
+  value: unknown,
   maxLength?: number
 ): string | null {
+  if (value === null || value === undefined) return null;
+
+  if (typeof value !== "string") {
+    switch (type) {
+      case "number":
+        return typeof value === "number" && Number.isFinite(value)
+          ? null
+          : "Dieser Wert muss eine Zahl sein.";
+      case "boolean":
+        return typeof value === "boolean" ? null : "Dieser Wert muss an oder aus sein.";
+      default:
+        return `Dieser Wert muss ein Text sein (gefunden: ${kindOf(value)}).`;
+    }
+  }
+
   if (maxLength != null && value.length > maxLength) {
     return `Text ist zu lang (${value.length} von max. ${maxLength} Zeichen).`;
   }
@@ -18,7 +51,7 @@ export function validateDraftValue(
   if (trimmed === "") return null;
   switch (type) {
     case "number":
-      if (!/^[-+]?\d+([.,]\d+)?$/.test(trimmed)) {
+      if (!NUM_RE.test(trimmed)) {
         return `"${value}" ist keine gültige Zahl (erlaubt z. B. "42" oder "19,90").`;
       }
       return null;
@@ -59,4 +92,38 @@ export function validateDraftValue(
     default:
       return null;
   }
+}
+
+/**
+ * Prüft einen Entwurfswert (immer String) gegen den Feldtyp.
+ * Liefert null wenn ok, sonst eine deutsche Fehlermeldung für den Kunden.
+ */
+export function validateDraftValue(
+  type: FieldType,
+  value: string,
+  maxLength?: number
+): string | null {
+  return validateJsonValue(type, value, maxLength);
+}
+
+/**
+ * Wandelt einen Entwurfs-String zieltypabhängig um: Nur Boolean-Felder
+ * werden zu echten Booleans, nur Zahl-Felder zu echten Zahlen. Texte wie
+ * "true" in Textfeldern bleiben Text. Ungültiges bleibt unverändert (die
+ * Prüfung meldet es danach).
+ */
+export function convertStoredValue(type: FieldType, value: string): unknown {
+  const trimmed = value.trim();
+  if (type === "boolean") {
+    if (trimmed === "true") return true;
+    if (trimmed === "false") return false;
+    return value;
+  }
+  if (type === "number") {
+    if (trimmed !== "" && NUM_RE.test(trimmed)) {
+      return Number(trimmed.replace(",", "."));
+    }
+    return value;
+  }
+  return value;
 }
