@@ -1,8 +1,17 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { createOctokit, getManifest, getRepoFile } from "@/lib/github";
+import { createOctokit, getManifestRaw, getRepoFile, normalizeManifest } from "@/lib/github";
 import { setByPath } from "@/lib/json-path";
 import { validateDraftValue } from "@/lib/validate";
+import {
+  canonicalTarget,
+  collectManifestTargets,
+  extractRawFields,
+  isAllowedFieldJsonFile,
+  parseFreeDraftIdSafe,
+  validateFieldTargets,
+  validateFullJsonDraft,
+} from "@/lib/content-guard";
 import {
   AI_MAX_FILE_CHARS,
   MANIFEST_PATH,
@@ -12,27 +21,18 @@ import {
   isAllowedContentPath,
   validateManifestText,
 } from "@/lib/ai";
-import type { CodeDraft, Draft, Site } from "@/types/cms";
+import type { CodeDraft, Draft, FieldType, Site } from "@/types/cms";
 import { FREE_DRAFT_PREFIX } from "@/types/cms";
 
 const COMMIT_MESSAGE = "cms: update content by client";
 const BLOG_MD = /^src\/content\/blog\/[a-z0-9-]+\.md$/;
 
-/** Zerlegt freie Entwurfs-IDs ("json:<datei>:<pfad>") – null wenn keine freie ID. */
-function parseFreeDraftId(id: string): { file: string; path: string } | null {
-  if (!id.startsWith(FREE_DRAFT_PREFIX)) return null;
-  const rest = id.slice(FREE_DRAFT_PREFIX.length);
-  const sep = rest.indexOf(":");
-  if (sep < 0) return null;
-  return { file: rest.slice(0, sep), path: rest.slice(sep + 1) };
-}
-
 interface FileEdit {
   draftId: string;
+  fieldId: string;
   path: string;
   value: string;
   label: string;
-  isNumber: boolean;
 }
 
 export async function POST(request: Request) {
@@ -104,11 +104,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: "Keine unveröffentlichten Änderungen vorhanden." });
     }
 
-    // Manifest laden, um Feld-ID -> Datei/Pfad aufzulösen
+    // Manifest vom Server laden (ein Abruf): Diese Definition gilt.
+    // Vom Client kommen nur siteId – keine Dateipfade, Typen oder
+    // Ersatz-Manifeste. Die Roh-Definition wird unten streng geprüft.
     const octokit = createOctokit();
+    let manifestRaw: unknown;
     let manifest;
     try {
-      manifest = await getManifest(octokit, typedSite.repo_owner, typedSite.repo_name);
+      const loaded = await getManifestRaw(octokit, typedSite.repo_owner, typedSite.repo_name);
+      manifestRaw = loaded.parsed;
+      manifest = normalizeManifest(manifestRaw);
     } catch (err) {
       return NextResponse.json(
         {
@@ -124,53 +129,68 @@ export async function POST(request: Request) {
       manifest.sections.flatMap((s) => s.fields.map((f) => [f.id, f] as const))
     );
 
-    // Entwürfe auflösen: Manifest-Feld oder freier Datei-Pfad
+    // Entwürfe auflösen: Manifest-Feld, freier JSON-Pfad oder unbekannt.
+    // Freie IDs ("json:<datei>:<pfad>") müssen der Dateisperre und der
+    // Pfad-Sicherheit genügen – ein Verstoß bricht den gesamten Satz ab.
+    // Unbekannte IDs ohne json-Präfix bleiben als Entwurf erhalten (wie bisher).
     const editsByFile = new Map<string, FileEdit[]>();
     const skipped: string[] = [];
-    const validationErrors: string[] = [];
+    const targetErrors: string[] = [];
+    const freeTargets: Array<{ draft: Draft; file: string; path: string }> = [];
     for (const draft of typedDrafts) {
       const field = fieldMap.get(draft.field_id);
       if (field) {
-        if (!field.file.endsWith(".json")) {
-          skipped.push(draft.field_id);
-          continue;
-        }
-        const problem = validateDraftValue(field.type, draft.value, field.maxLength);
-        if (problem) {
-          validationErrors.push(`${field.label}: ${problem}`);
-          continue;
-        }
         const list = editsByFile.get(field.file) ?? [];
         list.push({
           draftId: draft.id,
+          fieldId: field.id,
           path: field.path,
           value: draft.value,
           label: field.label,
-          isNumber: field.type === "number",
         });
         editsByFile.set(field.file, list);
         continue;
       }
-      const free = parseFreeDraftId(draft.field_id);
-      if (free && free.file.endsWith(".json") && isAllowedContentPath(free.file) && free.file !== MANIFEST_PATH && free.path) {
-        const list = editsByFile.get(free.file) ?? [];
-        list.push({ draftId: draft.id, path: free.path, value: draft.value, label: free.path, isNumber: false });
-        editsByFile.set(free.file, list);
-      } else {
-        skipped.push(draft.field_id);
+      if (draft.field_id.startsWith(FREE_DRAFT_PREFIX)) {
+        const parsed = parseFreeDraftIdSafe(draft.field_id);
+        if (!parsed.ok) {
+          targetErrors.push(parsed.error);
+          continue;
+        }
+        freeTargets.push({ draft, file: parsed.file, path: parsed.path });
+        continue;
       }
+      skipped.push(draft.field_id);
     }
 
-    if (validationErrors.length > 0) {
-      return NextResponse.json(
-        {
-          error: `Bitte korrigiere zuerst diese Felder (es wurde nichts veröffentlicht):\n- ${validationErrors.join("\n- ")}`,
-        },
-        { status: 400 }
-      );
+    // Freie Ziele dürfen kein Manifestfeld-Ziel doppeln (sonst gewinnt
+    // stillschweigend einer von beiden). Schreibweisen-normiert vergleichen
+    // (items[0].x und items.0.x sind dasselbe Ziel).
+    const manifestTargets = collectManifestTargets(extractRawFields(manifestRaw));
+    for (const free of freeTargets) {
+      const canonical = canonicalTarget(free.file, free.path);
+      const clash = canonical ? manifestTargets.get(canonical) : undefined;
+      if (clash) {
+        targetErrors.push(
+          `Entwurf "${free.draft.field_id}": Das Ziel wird bereits von Feld "${clash}" beschrieben.`
+        );
+        continue;
+      }
+      const list = editsByFile.get(free.file) ?? [];
+      list.push({
+        draftId: free.draft.id,
+        fieldId: free.draft.field_id,
+        path: free.path,
+        value: free.draft.value,
+        label: free.path,
+      });
+      editsByFile.set(free.file, list);
     }
 
-    // Code-Entwürfe prüfen (Whitelist, Größe, Geheimnisse) – vor jedem Commit
+    // Vollständige Datei-Entwürfe prüfen (Whitelist, Größe, Geheimnisse).
+    // JSON-Inhaltsdateien müssen zusätzlich der Dateisperre für normale
+    // Inhaltsziele genügen und saubere Objekte sein – sonst ließe sich die
+    // Inhaltsprüfung über einen Komplett-Entwurf umgehen. Alles vor jedem Commit.
     const codeByFile = new Map<string, CodeDraft>();
     for (const cd of codeDrafts) {
       const isManifest = cd.file_path === MANIFEST_PATH;
@@ -204,26 +224,59 @@ export async function POST(request: Request) {
           );
         }
       }
+      if (isContent && cd.file_path.endsWith(".json") && !isManifest) {
+        if (!isAllowedFieldJsonFile(cd.file_path)) {
+          return NextResponse.json(
+            { error: `Die Datei "${cd.file_path}" ist kein erlaubtes Inhaltsziel (erlaubt: src/content/site.json und JSON-Dateien unter src/content/pages/). Entwurf wurde nicht angerührt.` },
+            { status: 400 }
+          );
+        }
+        const problem = validateFullJsonDraft(cd.content);
+        if (problem) {
+          return NextResponse.json(
+            { error: `Die Datei "${cd.file_path}" kann so nicht übernommen werden: ${problem} Entwurf wurde nicht angerührt.` },
+            { status: 400 }
+          );
+        }
+      }
       codeByFile.set(cd.file_path, cd);
     }
 
-    const allFiles = new Set<string>([...editsByFile.keys(), ...codeByFile.keys()]);
-    if (allFiles.size === 0) {
-      return NextResponse.json(
-        { error: "Keine Entwürfe konnten zugeordnet werden." },
-        { status: 400 }
-      );
+    // Nichts zu tun? Dann ehrlich melden (kein stilles "Erfolg").
+    // Hinweis: Unbekannte Entwurfs-IDs landen in "skipped" und werden in der
+    // Antwort offengelegt; alle anderen Fehler brechen unten bereits ab.
+    if (editsByFile.size === 0 && codeByFile.size === 0 && targetErrors.length === 0) {
+      const skippedNote =
+        skipped.length > 0
+          ? ` (${skipped.length} Eintrag/Einträge ohne Zuordnung bleiben als Entwurf erhalten).`
+          : "";
+      return NextResponse.json({
+        message: `Keine unveröffentlichten Änderungen vorhanden.${skippedNote}`,
+      });
     }
 
     // Phase 1: ALLE Dateien vorab laden. Erst wenn alles ok ist, wird committet.
+    // Neben den Entwurfs-Dateien werden alle erlaubten Manifestdateien geladen,
+    // damit die Pfad-Existenz jedes Felds prüfbar ist. Unerlaubte Manifestziele
+    // werden gar nicht erst aus dem Repo gelesen (sie landen als Fehler unten).
     const committedFields: string[] = [];
     const committedDraftIds: string[] = [];
     const committedFiles: string[] = [];
     const payload: Record<string, Record<string, unknown>> = {};
     let lastCommitSha: string | null = null;
 
+    const loadFiles = new Set<string>();
+    for (const entry of extractRawFields(manifestRaw)) {
+      const file = (entry as { file?: unknown })?.file;
+      if (typeof file === "string" && isAllowedFieldJsonFile(file)) loadFiles.add(file);
+    }
+    for (const filePath of editsByFile.keys()) {
+      if (isAllowedFieldJsonFile(filePath)) loadFiles.add(filePath);
+    }
+    for (const filePath of codeByFile.keys()) loadFiles.add(filePath);
+
     const baseFiles = new Map<string, { text: string; sha: string }>();
-    for (const filePath of allFiles) {
+    for (const filePath of loadFiles) {
       try {
         const file = await getRepoFile(octokit, typedSite.repo_owner, typedSite.repo_name, filePath);
         baseFiles.set(filePath, {
@@ -247,9 +300,54 @@ export async function POST(request: Request) {
       }
     }
 
-    // Inhalte zusammenbauen: Code-Entwurf als Basis (falls vorhanden), sonst Live-Stand + Feld-Änderungen
+    // Server-Manifest gegen die geladenen Inhalte prüfen (Struktur, Typen,
+    // Dateisperre, Duplikate, Pfad-Existenz) – vor jedem Repository-Schreibvorgang.
+    const parsedJson = new Map<string, Record<string, unknown>>();
+    for (const [filePath, base] of baseFiles) {
+      if (!filePath.endsWith(".json") || BLOG_MD.test(filePath)) continue;
+      try {
+        parsedJson.set(filePath, JSON.parse(base.text) as Record<string, unknown>);
+      } catch {
+        return NextResponse.json(
+          { error: `Die Datei "${filePath}" enthält kein gültiges JSON und kann nicht gespeichert werden. Entwürfe bleiben erhalten.` },
+          { status: 400 }
+        );
+      }
+    }
+    const manifestErrors = validateFieldTargets(extractRawFields(manifestRaw), parsedJson);
+    const allErrors = [...targetErrors, ...manifestErrors];
+
+    // Werte gegen die Server-Typen prüfen (keine Client-Typen vertrauen).
+    // Erst wenn ALLES ok ist, wird überhaupt etwas geschrieben (Fail-Closed).
+    const valueErrors: string[] = [];
+    for (const fileEdits of editsByFile.values()) {
+      for (const edit of fileEdits) {
+        const field = fieldMap.get(edit.fieldId);
+        const type: FieldType = field ? field.type : "text";
+        const problem = validateDraftValue(type, edit.value, field?.maxLength);
+        if (problem) {
+          valueErrors.push(`${edit.label}: ${problem}`);
+        }
+      }
+    }
+
+    const blockingErrors = [...allErrors, ...valueErrors];
+    if (blockingErrors.length > 0) {
+      return NextResponse.json(
+        {
+          error: `Bitte korrigiere zuerst diese Punkte (es wurde nichts veröffentlicht, Entwürfe bleiben erhalten):\n- ${blockingErrors.join("\n- ")}`,
+        },
+        { status: 400 }
+      );
+    }
+
+    // Inhalte zusammenbauen: Code-Entwurf als Basis (falls vorhanden), sonst Live-Stand + Feld-Änderungen.
+    // Alle Ziele wurden oben geprüft; schlägt hier trotzdem etwas fehl,
+    // wird ebenfalls nichts geschrieben.
+    const assemblyErrors: string[] = [];
     const finalContent = new Map<string, { text: string; kind: "json" | "text" }>();
-    for (const filePath of allFiles) {
+    const assemblyFiles = new Set<string>([...editsByFile.keys(), ...codeByFile.keys()]);
+    for (const filePath of assemblyFiles) {
       const code = codeByFile.get(filePath);
       const edits = editsByFile.get(filePath) ?? [];
       const base = baseFiles.get(filePath)!;
@@ -273,17 +371,16 @@ export async function POST(request: Request) {
         continue;
       }
 
-      // JSON: Basis parsen (Entwurf bevorzugt), Feld-Änderungen einarbeiten
+      // JSON: Basis parsen (Entwurf bevorzugt), Feld-Änderungen einarbeiten.
+      // Volle Datei-Entwürfe wurden oben bereits geprüft (gültig + ungefährlich).
       let json: Record<string, unknown>;
       try {
         json = code
           ? (JSON.parse(code.content) as Record<string, unknown>)
           : (JSON.parse(base.text) as Record<string, unknown>);
       } catch {
-        return NextResponse.json(
-          { error: `Die Datei "${filePath}" enthält kein gültiges JSON und kann nicht gespeichert werden.` },
-          { status: 400 }
-        );
+        assemblyErrors.push(`Die Datei "${filePath}" enthält kein gültiges JSON.`);
+        continue;
       }
       for (const edit of edits) {
         // Ja/Nein-Schalter als echte Booleans speichern (nicht als Text),
@@ -291,14 +388,32 @@ export async function POST(request: Request) {
         let stored: unknown = edit.value;
         if (edit.value === "true") stored = true;
         else if (edit.value === "false") stored = false;
-        else if (edit.isNumber && edit.value.trim() !== "") {
-          stored = Number(edit.value.trim().replace(",", "."));
+        else {
+          const field = fieldMap.get(edit.fieldId);
+          if (field?.type === "number" && edit.value.trim() !== "") {
+            stored = Number(edit.value.trim().replace(",", "."));
+          }
         }
-        setByPath(json, edit.path, stored);
+        try {
+          setByPath(json, edit.path, stored);
+        } catch (err) {
+          assemblyErrors.push(
+            `Feld "${edit.label}": ${err instanceof Error ? err.message : "Pfad konnte nicht geschrieben werden."}`
+          );
+        }
       }
       const text = JSON.stringify(json, null, 2);
       finalContent.set(filePath, { text, kind: "json" });
       payload[filePath] = json;
+    }
+
+    if (assemblyErrors.length > 0) {
+      return NextResponse.json(
+        {
+          error: `Bitte korrigiere zuerst diese Punkte (es wurde nichts veröffentlicht, Entwürfe bleiben erhalten):\n- ${assemblyErrors.join("\n- ")}`,
+        },
+        { status: 400 }
+      );
     }
 
     // Phase 2: jetzt erst committen (alles wurde oben geprüft)

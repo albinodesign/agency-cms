@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:reparatur1": "node scripts/reparatur1-check.mjs"
   },
   "dependencies": {
     "@ai-sdk/react": "^4.0.112",

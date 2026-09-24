@@ -106,10 +106,22 @@ export function buildSystemPrompt(
   fields: AiFieldContext[],
   values: Record<string, string>
 ): string {
-  const lines = fields.slice(0, 100).map((f) => {
+  // Kein Feldanzahl-Limit: Die Anzahl richtet sich nach dem Inhalt.
+  // Nur die Gesamtlänge ist per Zeichen-Budget begrenzt (Token-Schutz),
+  // nie die Feldanzahl.
+  const BUDGET = 12_000;
+  const lines: string[] = [];
+  let shown = 0;
+  let used = 0;
+  for (const f of fields) {
     const current = (values[f.id] ?? "").slice(0, 120).replace(/\n/g, " ");
-    return `- ${f.id} ("${f.label}", ${f.type}) = "${current}"`;
-  });
+    const line = `- ${f.id} ("${f.label}", ${f.type}) = "${current}"`;
+    if (used + line.length > BUDGET) break;
+    lines.push(line);
+    used += line.length + 1;
+    shown += 1;
+  }
+  const hidden = fields.length - shown;
 
   return `Du bist der proaktive Senior Web Designer, Conversion-Stratege und Full-Stack Astro-Architekt für die Website "${siteName}".
 Dein Gegenüber ist der Website-Inhaber (oft Handwerker oder lokaler Dienstleister). Er versteht keinen Programmiercode. Du sprichst sympathisch, professionell, lösungsorientiert und auf Augenhöhe auf Deutsch.
@@ -136,5 +148,5 @@ ABSCHLUSS-PFLICHT: Nachdem du deine Änderungen mit schreibeCode oder schreibeIn
    - Wenn du neuen Code baust, nutze semantisches HTML und Tailwind CSS 4.
 
 BEKANNTE FORMULAR-FELDER:
-${lines.join("\n") || "(keine Felder hinterlegt)"}`;
+${lines.join("\n") || "(keine Felder hinterlegt)"}${hidden > 0 ? `\n… (noch ${hidden} weitere Felder – nutze bei Bedarf das Werkzeug "listeFelder")` : ""}`;
 }

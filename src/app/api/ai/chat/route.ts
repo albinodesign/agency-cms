@@ -19,7 +19,12 @@ import {
   isAllowedContentPath,
   validateManifestText,
 } from "@/lib/ai";
-import type { Site } from "@/types/cms";
+import {
+  SUPPORTED_FIELD_TYPES,
+  isAllowedFieldJsonFile,
+  validateJsonPath,
+} from "@/lib/content-guard";
+import type { FieldType, Site } from "@/types/cms";
 import { FREE_DRAFT_PREFIX } from "@/types/cms";
 
 /** Ordnet einen OpenRouter-Fehler auf eine deutsche Kunden-Meldung zu. */
@@ -259,15 +264,26 @@ export async function POST(request: Request) {
         if (feldId) {
           const field = fieldMap.get(feldId);
           if (!field) return { fehler: `Das Feld "${feldId}" gibt es nicht.` };
-          const problem = validateDraftValue(field.type as "text", wert, undefined);
+          // Typ aus dem (Client-)Kontext nur nach Prüfung nutzen – der
+          // Publish prüft später gegen das Server-Manifest (entscheidend).
+          const fieldType = (field as { type?: unknown }).type;
+          const safeType: FieldType = SUPPORTED_FIELD_TYPES.includes(fieldType as FieldType)
+            ? (fieldType as FieldType)
+            : "text";
+          const problem = validateDraftValue(safeType, wert, undefined);
           if (problem) return { fehler: `${field.label}: ${problem}` };
           const { error } = await upsertDraft(feldId, wert);
           if (error) return { fehler: `Entwurf konnte nicht gespeichert werden: ${error.message}` };
           return { art: "feld", feldId, wert, vorschau: "sofort", meldung: `"${field.label}" als Entwurf gespeichert, Kunde sieht es sofort in der Vorschau.` };
         }
         if (datei && pfad) {
-          if (!isAllowedContentPath(datei) || datei === MANIFEST_PATH) {
-            return { fehler: `Die Datei "${datei}" darfst du so nicht ändern.` };
+          // Gleiche Dateisperre + Pfad-Sicherheit wie im Publish (Fail-Closed).
+          if (!isAllowedFieldJsonFile(datei)) {
+            return { fehler: `Die Datei "${datei}" ist kein erlaubtes Inhaltsziel (erlaubt: src/content/site.json und JSON-Dateien unter src/content/pages/).` };
+          }
+          const pathProblem = validateJsonPath(pfad);
+          if (pathProblem) {
+            return { fehler: `Der Pfad "${pfad}" ist ungültig: ${pathProblem}` };
           }
           const freeId = `${FREE_DRAFT_PREFIX}${datei}:${pfad}`;
           const { error } = await upsertDraft(freeId, wert);

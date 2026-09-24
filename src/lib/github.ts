@@ -191,3 +191,27 @@ export async function getManifest(
 
   return normalizeManifest(parsed);
 }
+
+/**
+ * Lädt das Roh-Manifest (ein Abruf) für serverseitige Prüfungen:
+ * Die Publish-Route validiert die Roh-Definition (IDs, Typen, Ziele),
+ * bevor sie der normalisierten Form vertraut.
+ */
+export async function getManifestRaw(
+  octokit: Octokit,
+  owner: string,
+  repo: string
+): Promise<{ text: string; parsed: unknown }> {
+  const { text } = await getRepoFile(octokit, owner, repo, MANIFEST_PATH);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(
+      `Die Datei "${MANIFEST_PATH}" enthält kein gültiges JSON.`
+    );
+  }
+
+  return { text, parsed };
+}
