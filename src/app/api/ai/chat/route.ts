@@ -3,7 +3,7 @@ import { streamText, tool, stepCountIs, convertToModelMessages } from "ai";
 import type { UIMessage } from "ai";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
-import { createOctokit, getRepoFile } from "@/lib/github";
+import { createOctokit, getManifestRaw, getRepoFile, normalizeManifest } from "@/lib/github";
 import { validateDraftValue } from "@/lib/validate";
 import {
   AI_MAX_FILE_CHARS,
@@ -88,7 +88,8 @@ export async function POST(request: Request) {
   const { siteId, conversationId } = body;
   const clientMessages = Array.isArray(body.messages) ? body.messages : [];
   const context = body.context ?? {};
-  const fields = Array.isArray(context.fields) ? context.fields : [];
+  // Hinweis: context.fields (Client) wird nicht mehr für Werkzeuge genutzt –
+  // entscheidend ist die Server-Feldliste (unten). Nur values als Kontext.
   const values = context.values && typeof context.values === "object" ? context.values : {};
 
   if (!siteId || typeof siteId !== "string") {
@@ -166,6 +167,32 @@ export async function POST(request: Request) {
   }
   const activeConvId = convId;
 
+  // Server-Feldliste zuerst laden (ein Abruf pro Nachricht): Die KI arbeitet
+  // damit, nicht mit der Client-Liste. So sind Prompt, listeFelder und
+  // schreibeInhalt vollständig und stimmen mit der Publish-Prüfung überein.
+  let octokit: ReturnType<typeof createOctokit> | null = null;
+  function octo() {
+    if (!octokit) octokit = createOctokit();
+    return octokit;
+  }
+  let serverFields: AiFieldContext[];
+  try {
+    const loaded = await getManifestRaw(octo(), site.repo_owner, site.repo_name);
+    const serverManifest = normalizeManifest(loaded.parsed);
+    serverFields = serverManifest.sections.flatMap((s) =>
+      s.fields.map((f) => ({ id: f.id, label: f.label, type: f.type, file: f.file, path: f.path }))
+    );
+  } catch (err) {
+    return NextResponse.json(
+      {
+        error: `Die Feldliste konnte nicht aus GitHub geladen werden: ${
+          err instanceof Error ? err.message : "Unbekannter Fehler"
+        }`,
+      },
+      { status: 502 }
+    );
+  }
+
   // Hochgeladene Dateien (Bilder/PDFs als URL) aus der Kundennachricht einsammeln:
   // convertToModelMessages übergibt sie ans Modell, hier zusätzlich als Hinweis
   // in den Prompt, damit die KI die URLs direkt im Code verwenden darf.
@@ -178,7 +205,8 @@ export async function POST(request: Request) {
       }
     }
   }
-  let system = buildSystemPrompt(site.name, fields, values);
+  let system = buildSystemPrompt(site.name, serverFields, values);
+  system += `\n\nHinweis zur Feldliste: Aus Platzgründen stehen oben ggf. nicht alle Felder. Die Liste ist dann unvollständig markiert – die VOLLSTÄNDIGE Liste erhältst du jederzeit über das Werkzeug "listeFelder", volle Datei-Inhalte über "leseDatei" oder "projektUebersicht". Rate niemals Pfade, lade sie nach.`;
   if (hochgeladen.length > 0) {
     const liste = hochgeladen
       .map((d) => `- ${d.name ?? "Datei"} (${d.mediaType ?? "unbekannt"}): ${d.url}`)
@@ -193,12 +221,10 @@ export async function POST(request: Request) {
     content: { text: userContent, dateien: hochgeladen },
   });
 
-  const fieldMap = new Map(fields.map((f) => [f.id, f]));
-  let octokit: ReturnType<typeof createOctokit> | null = null;
-  function octo() {
-    if (!octokit) octokit = createOctokit();
-    return octokit;
-  }
+  // Serverseitiger Such-/Nachladeweg: vollständige Server-Feldliste für
+  // alle Werkzeuge (listeFelder, schreibeInhalt). Der Client schickt weiter
+  // aktuelle Werte (values) als Kontext – entscheidend ist die Server-Liste.
+  const fieldMap = new Map(serverFields.map((f) => [f.id, f]));
 
   async function upsertDraft(fieldId: string, value: string) {
     return supabase
@@ -228,10 +254,10 @@ export async function POST(request: Request) {
       },
     }),
     listeFelder: tool({
-      description: "Listet alle bearbeitbaren Felder der Website (ID, Name, Typ).",
+      description: "Listet ALLE bearbeitbaren Felder der Website (ID, Name, Typ) – serverseitig, immer vollständig, auch wenn der Prompt gekürzt war.",
       inputSchema: z.object({}),
       execute: async () => ({
-        felder: fields.map((f) => ({ id: f.id, name: f.label, typ: f.type })),
+        felder: serverFields.map((f) => ({ id: f.id, name: f.label, typ: f.type })),
       }),
     }),
     leseDatei: tool({

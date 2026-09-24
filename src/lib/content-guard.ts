@@ -14,7 +14,7 @@
  * Regeln in der Publish-Route (Whitelist, Geheimnis-Scan, Brücken-Check,
  * Gültigkeits-Check). Diese Datei deckt nur normale Inhaltsziele ab.
  */
-import { getByPath, parsePathSafe } from "./json-path";
+import { getByPath, getBySegments, parsePathSafe } from "./json-path";
 import type { CmsManifest, FieldType } from "../types/cms";
 import { FREE_DRAFT_PREFIX } from "../types/cms";
 
@@ -129,10 +129,13 @@ function fileTargetError(fieldLabel: string, file: string): string {
  * (leer = alles ok). Prüft: vorhandene id, eindeutige IDs, unterstützte Typen,
  * sinnvolle maxLength, erlaubte Zieldatei, sicheren Pfad, eindeutige Ziele
  * (Schreibweisen-normiert) und tatsächliche Pfad-Existenz in der Datei.
+ * Pfade, die im selben Änderungssatz durch eine akzeptierte Erstellung
+ * (pendingCreations als "datei#kanonisch") entstehen, gelten als abgedeckt.
  */
 export function validateFieldTargets(
   rawFields: unknown[],
-  fileContents: Map<string, Record<string, unknown>>
+  fileContents: Map<string, Record<string, unknown>>,
+  pendingCreations: Set<string> = new Set()
 ): string[] {
   const errors: string[] = [];
   const seenIds = new Map<string, number>();
@@ -204,6 +207,8 @@ export function validateFieldTargets(
       return;
     }
     if (getByPath(json, field.path as string) === undefined) {
+      const target = canonicalTarget(file, field.path as string) as string;
+      if (pendingCreations.has(target)) return; // entsteht im selben Satz
       errors.push(`Feld "${id}": Pfad "${field.path}" existiert nicht in Datei "${file}".`);
     }
   });
@@ -229,6 +234,121 @@ export function collectManifestTargets(rawFields: unknown[]): Map<string, string
 export type FreeDraftParse =
   | { ok: true; file: string; path: string; error: "" }
   | { ok: false; file: ""; path: ""; error: string };
+
+/** Erlaubte Banner-Stile (muss zur Website-Darstellung passen). */
+export const BANNER_VARIANTS = ["vacation", "emergency", "info"] as const;
+
+/** Maximale Banner-Textlänge (muss zum Website-Layout passen). */
+export const BANNER_TEXT_MAX = 160;
+
+/** Generelle Wert-Obergrenze für freie Entwürfe (wie im KI-Werkzeug). */
+export const FREE_VALUE_MAX = 20_000;
+
+export interface FreeCreation {
+  kind: "banner" | "append";
+  file: string;
+  canonical: string;
+}
+
+export type FreeClassify =
+  | { ok: true; creation: FreeCreation | null; canonical: string }
+  | { ok: false; error: string };
+
+function isPlainObject(node: unknown): node is Record<string, unknown> {
+  return typeof node === "object" && node !== null && !Array.isArray(node);
+}
+
+/**
+ * Enge Erstellungsregeln für freie Entwürfe (Ausnahmen vom Bestandsgebot):
+ * - Bereits vorhandene Pfade: normales Schreiben.
+ * - Banner-Felder (`banner.enabled|variant|text` in site.json): dürfen den
+ *   `banner`-Behälter anlegen, Werte werden typgeprüft (an/aus, Stil-Enum,
+ *   Textlänge). Das CMS besitzt dieses Modell (Banner-Schalter), die Website
+ *   rendert `site.banner`.
+ * - Listen-Ergänzung: Anhängen exakt am Ende einer bestehenden Liste, wahlweise
+ *   als einzelner Wert oder als neues Element mit genau einem Feld
+ *   (z. B. `items[3].frage` bei Länge 3 für eine neue FAQ-Frage).
+ * Alles andere Neue (beliebige Schlüssel, tiefere Strukturen) wird abgelehnt.
+ * Aufrufstellen: Publish-Route (vorab + Endkontrolle) und KI-Werkzeug
+ * `schreibeInhalt` (frühe Rückmeldung).
+ */
+export function classifyFreeTarget(
+  file: string,
+  path: string,
+  fileJson: Record<string, unknown> | undefined,
+  value: string
+): FreeClassify {
+  const parsed = parsePathSafe(path);
+  if (!parsed.ok) return { ok: false, error: parsed.error };
+  const segments = parsed.segments;
+  const canonical = `${file}#${parsed.canonical}`;
+
+  if (fileJson && getBySegments(fileJson, segments) !== undefined) {
+    return { ok: true, creation: null, canonical };
+  }
+
+  // Ausnahme 1: Banner-Modell (Besitzer: CMS-Banner-Schalter).
+  if (
+    file === SITE_JSON &&
+    segments.length === 2 &&
+    segments[0] === "banner" &&
+    typeof segments[1] === "string"
+  ) {
+    const key = segments[1];
+    const existing = fileJson?.banner;
+    if (existing !== undefined && !isPlainObject(existing)) {
+      return { ok: false, error: `Der Schlüssel "banner" in ${SITE_JSON} ist kein Objekt – Banner kann nicht angelegt werden.` };
+    }
+    const trimmed = value.trim();
+    if (key === "enabled") {
+      if (trimmed !== "true" && trimmed !== "false") {
+        return { ok: false, error: `Banner-Schalter braucht "true" oder "false" (erhalten: "${value.slice(0, 40)}").` };
+      }
+    } else if (key === "variant") {
+      if (!(BANNER_VARIANTS as readonly string[]).includes(trimmed)) {
+        return { ok: false, error: `Banner-Stil muss einer von ${BANNER_VARIANTS.join(", ")} sein.` };
+      }
+    } else if (key === "text") {
+      if (value.length > BANNER_TEXT_MAX) {
+        return { ok: false, error: `Banner-Text ist zu lang (${value.length} von max. ${BANNER_TEXT_MAX} Zeichen).` };
+      }
+    } else {
+      return { ok: false, error: `Unbekanntes Banner-Feld "${key}" (erlaubt: enabled, variant, text).` };
+    }
+    return { ok: true, creation: { kind: "banner", file, canonical }, canonical };
+  }
+
+  // Ausnahme 2: Listen-Ergänzung exakt am Ende einer bestehenden Liste.
+  if (fileJson) {
+    let node: unknown = fileJson;
+    for (let k = 0; k < segments.length; k += 1) {
+      const seg = segments[k];
+      if (typeof seg === "number") {
+        if (!Array.isArray(node)) break;
+        if (seg < 0 || seg > node.length) break;
+        if (seg === node.length) {
+          const rest = segments.slice(k + 1);
+          if (rest.length === 0 || (rest.length === 1 && typeof rest[0] === "string")) {
+            if (value.length > FREE_VALUE_MAX) {
+              return { ok: false, error: `Der Text ist zu lang (max. ${FREE_VALUE_MAX} Zeichen).` };
+            }
+            return { ok: true, creation: { kind: "append", file, canonical }, canonical };
+          }
+          break;
+        }
+        node = node[seg];
+        continue;
+      }
+      if (!isPlainObject(node) || !Object.prototype.hasOwnProperty.call(node, seg)) break;
+      node = node[seg];
+    }
+  }
+
+  return {
+    ok: false,
+    error: `Der Pfad "${path}" existiert nicht in Datei "${file}" – freie Entwürfe dürfen nur bestehende Pfade beschreiben oder ausdrücklich freigegebene Ergänzungen (Banner-Felder, Listen-Ergänzung am Ende) anlegen.`,
+  };
+}
 
 /**
  * Zerlegt freie Entwurfs-IDs ("json:<datei>:<pfad>") und prüft Dateisperre

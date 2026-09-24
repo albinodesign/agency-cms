@@ -126,8 +126,16 @@ export function validateJsonPath(path: unknown): string | null {
 export function getByPath(obj: Record<string, unknown>, path: string): unknown {
   const parsed = parsePathSafe(path);
   if (!parsed.ok) return undefined;
+  return getBySegments(obj, parsed.segments);
+}
+
+/** Liest einen Wert per bereits geprüfter Segmentliste (eigene Props, Array-Grenzen). */
+export function getBySegments(
+  obj: Record<string, unknown>,
+  segments: Array<string | number>
+): unknown {
   let current: unknown = obj;
-  for (const key of parsed.segments) {
+  for (const key of segments) {
     if (typeof current !== "object" || current === null) return undefined;
     if (typeof key === "number") {
       if (!Array.isArray(current) || key < 0 || key >= current.length) return undefined;

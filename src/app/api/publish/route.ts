@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createOctokit, getManifestRaw, getRepoFile, normalizeManifest } from "@/lib/github";
-import { setByPath } from "@/lib/json-path";
+import { getByPath, setByPath } from "@/lib/json-path";
 import { validateDraftValue } from "@/lib/validate";
 import {
   canonicalTarget,
-  collectManifestTargets,
+  classifyFreeTarget,
   extractRawFields,
   isAllowedFieldJsonFile,
   parseFreeDraftIdSafe,
@@ -163,19 +163,44 @@ export async function POST(request: Request) {
       skipped.push(draft.field_id);
     }
 
-    // Freie Ziele dürfen kein Manifestfeld-Ziel doppeln (sonst gewinnt
-    // stillschweigend einer von beiden). Schreibweisen-normiert vergleichen
-    // (items[0].x und items.0.x sind dasselbe Ziel).
-    const manifestTargets = collectManifestTargets(extractRawFields(manifestRaw));
+    // Freie Ziele: kein stiller Doppel mit einem Manifest-ENTWURF desselben
+    // Satzes (gleicher Wert = überflüssig, anderer Wert = Konflikt mit 400).
+    // Schreibweisen-normiert vergleichen (items[0].x und items.0.x sind
+    // dasselbe Ziel). Überschneidung mit bloß deklarierten Manifestfeldern
+    // ist kein Fehler – sie wird über akzeptierte Erstellungen abgedeckt.
+    const manifestEditTargets = new Map<string, string>();
+    for (const [file, fileEdits] of editsByFile) {
+      for (const edit of fileEdits) {
+        const editCanonical = canonicalTarget(file, edit.path);
+        if (editCanonical && !manifestEditTargets.has(editCanonical)) {
+          manifestEditTargets.set(editCanonical, edit.value);
+        }
+      }
+    }
+    const seenFreeCanonicals = new Set<string>();
     for (const free of freeTargets) {
       const canonical = canonicalTarget(free.file, free.path);
-      const clash = canonical ? manifestTargets.get(canonical) : undefined;
-      if (clash) {
+      if (!canonical) {
+        targetErrors.push(`Entwurf "${free.draft.field_id}": ungültiger Pfad.`);
+        continue;
+      }
+      const manifestValue = manifestEditTargets.get(canonical);
+      if (manifestValue !== undefined) {
+        if (manifestValue !== free.draft.value) {
+          targetErrors.push(
+            `Entwurf "${free.draft.field_id}": Das Ziel wird in diesem Satz bereits anders beschrieben – bitte nur eine Stelle ändern.`
+          );
+        }
+        // Gleicher Wert: Der Manifest-Entwurf deckt es ab, freier entfällt.
+        continue;
+      }
+      if (seenFreeCanonicals.has(canonical)) {
         targetErrors.push(
-          `Entwurf "${free.draft.field_id}": Das Ziel wird bereits von Feld "${clash}" beschrieben.`
+          `Entwurf "${free.draft.field_id}": Das Ziel ist in diesem Satz doppelt vergeben (andere Schreibweise desselben Pfads?).`
         );
         continue;
       }
+      seenFreeCanonicals.add(canonical);
       const list = editsByFile.get(free.file) ?? [];
       list.push({
         draftId: free.draft.id,
@@ -314,7 +339,28 @@ export async function POST(request: Request) {
         );
       }
     }
-    const manifestErrors = validateFieldTargets(extractRawFields(manifestRaw), parsedJson);
+
+    // Freie Ziele einordnen: Bestand schreiben oder ausdrücklich freigegebene
+    // Erstellung (Banner-Felder, Listen-Ergänzung). Akzeptierte Erstellungen
+    // decken passende Manifestfeld-Pfade im selben Satz ab.
+    const pendingCreations = new Set<string>();
+    for (const [filePath, fileEdits] of editsByFile) {
+      for (const edit of fileEdits) {
+        if (fieldMap.has(edit.fieldId)) continue;
+        const verdict = classifyFreeTarget(filePath, edit.path, parsedJson.get(filePath), edit.value);
+        if (!verdict.ok) {
+          targetErrors.push(`Entwurf "${edit.fieldId}": ${verdict.error}`);
+          continue;
+        }
+        if (verdict.creation) pendingCreations.add(verdict.creation.canonical);
+      }
+    }
+
+    const manifestErrors = validateFieldTargets(
+      extractRawFields(manifestRaw),
+      parsedJson,
+      pendingCreations
+    );
     const allErrors = [...targetErrors, ...manifestErrors];
 
     // Werte gegen die Server-Typen prüfen (keine Client-Typen vertrauen).
@@ -411,6 +457,31 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error: `Bitte korrigiere zuerst diese Punkte (es wurde nichts veröffentlicht, Entwürfe bleiben erhalten):\n- ${assemblyErrors.join("\n- ")}`,
+        },
+        { status: 400 }
+      );
+    }
+
+    // Endkontrolle (Modell-Passung): Jeder einzelne Entwurfspfad muss im
+    // fertigen Datei-Stand tatsächlich auflösbar sein – sonst geht nichts raus.
+    // Das beweist, dass neue Inhalte wirklich zum Content-Modell passen
+    // (nicht nur, dass JSON geschrieben werden konnte).
+    const postErrors: string[] = [];
+    for (const [filePath, fileEdits] of editsByFile) {
+      const finalJson = payload[filePath] as Record<string, unknown> | undefined;
+      if (!finalJson || typeof finalJson !== "object") continue;
+      for (const edit of fileEdits) {
+        if (getByPath(finalJson, edit.path) === undefined) {
+          postErrors.push(
+            `Feld "${edit.label}": Pfad "${edit.path}" löst im fertigen Stand von "${filePath}" nicht auf – passt nicht zum Content-Modell.`
+          );
+        }
+      }
+    }
+    if (postErrors.length > 0) {
+      return NextResponse.json(
+        {
+          error: `Bitte korrigiere zuerst diese Punkte (es wurde nichts veröffentlicht, Entwürfe bleiben erhalten):\n- ${postErrors.join("\n- ")}`,
         },
         { status: 400 }
       );
