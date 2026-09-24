@@ -64,7 +64,7 @@ interface PageGroup {
   sections: ManifestSection[];
 }
 
-type DeployState = "idle" | "sending" | "building" | "done";
+type DeployState = "idle" | "sending" | "building" | "done" | "failed" | "slow";
 
 /** Bekannte Seiten-Präfixe (Sektions-ID/Titel oder Dateiname) -> Tab-Label */
 const PAGE_KEYWORDS: [RegExp, string][] = [
@@ -147,8 +147,8 @@ export function EditorClient({
   // Zuletzt angeklicktes Feld (wird kurz gelb markiert)
   const [selectedFieldId, setSelectedFieldId] = useState<string | null>(null);
   const selectFlashRef = useRef<number | null>(null);
-  // Timer für die Bau-Phase nach dem Veröffentlichen (wird beim Verlassen gelöscht)
-  const deployTimerRef = useRef<number | null>(null);
+  // Echte Aufbau-Abfrage nach dem Veröffentlichen (wird beim Verlassen gestoppt)
+  const deployPollRef = useRef<number | null>(null);
 
   // Blog-Feature aktiviert? (features.blog === true oder features.blog.enabled === true)
   const blogEnabled = useMemo(() => {
@@ -260,7 +260,7 @@ export function EditorClient({
     return () => {
       timers.forEach((t) => clearTimeout(t));
       if (selectFlashRef.current) window.clearTimeout(selectFlashRef.current);
-      if (deployTimerRef.current) window.clearTimeout(deployTimerRef.current);
+      if (deployPollRef.current) window.clearInterval(deployPollRef.current);
     };
   }, []);
 
@@ -336,7 +336,7 @@ export function EditorClient({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ siteId: site.id }),
       });
-      const body = (await res.json()) as { error?: string; message?: string };
+      const body = (await res.json()) as { error?: string; message?: string; commitSha?: string | null };
 
       if (!res.ok) {
         setDeployState("idle");
@@ -350,20 +350,56 @@ export function EditorClient({
       setLiveMap({ ...values });
       // Verlaufs-Liste sofort neu laden lassen
       setHistoryRefresh((k) => k + 1);
-      // Phase 2: Website wird neu aufgebaut (ca. 45–60 Sek.), danach Phase 3:
-      // Fertig-Meldung + Vorschau automatisch neu laden
-      setDeployState("building");
-      if (deployTimerRef.current) window.clearTimeout(deployTimerRef.current);
-      deployTimerRef.current = window.setTimeout(() => {
-        setDeployState("done");
-        if (iframeRef.current) {
-          iframeRef.current.src = iframeRef.current.src;
-        }
-      }, 50_000);
       pushToast(
         "success",
         body.message ?? "Änderungen wurden übertragen. Die Website wird jetzt neu aufgebaut."
       );
+
+      // Echter Aufbau-Check: alle 10 Sekunden bei GitHub nachfragen, was Vercel
+      // zu dieser Version meldet (läuft / fertig / fehlgeschlagen). Nach 3 Minuten
+      // ohne Antwort ehrlich sagen dass es länger dauert statt etwas zu behaupten.
+      if (deployPollRef.current) window.clearInterval(deployPollRef.current);
+      if (!body.commitSha) {
+        setDeployState("slow");
+        return;
+      }
+      setDeployState("building");
+      const sha = body.commitSha;
+      let tries = 0;
+      const poll = async () => {
+        tries += 1;
+        try {
+          const statusRes = await fetch(
+            `/api/site/${site.id}/deploy-status?sha=${encodeURIComponent(sha)}`
+          );
+          const statusBody = (await statusRes.json()) as { state?: string };
+          if (statusBody.state === "success") {
+            if (deployPollRef.current) window.clearInterval(deployPollRef.current);
+            deployPollRef.current = null;
+            setDeployState("done");
+            if (iframeRef.current) {
+              iframeRef.current.src = iframeRef.current.src;
+            }
+            return;
+          }
+          if (statusBody.state === "failure" || statusBody.state === "error") {
+            if (deployPollRef.current) window.clearInterval(deployPollRef.current);
+            deployPollRef.current = null;
+            setDeployState("failed");
+            return;
+          }
+        } catch {
+          // Netzfehler beim Abfragen: einfach weiter versuchen
+        }
+        if (tries >= 18) {
+          if (deployPollRef.current) window.clearInterval(deployPollRef.current);
+          deployPollRef.current = null;
+          setDeployState("slow");
+        }
+      };
+      deployPollRef.current = window.setInterval(() => void poll(), 10_000);
+      // Erste Abfrage sofort (nicht erst nach 10 Sekunden)
+      void poll();
     } catch {
       setDeployState("idle");
       pushToast("error", "Server nicht erreichbar. Bitte später erneut versuchen.");
@@ -435,7 +471,7 @@ export function EditorClient({
       a.click();
       a.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 5000);
-      pushToast("success", "Backup wurde heruntergeladen.");
+      pushToast("success", "Gesichert! Deine Website gehört dir – lade sie jederzeit herunter und nimm sie mit.");
     } catch {
       pushToast("error", "Server nicht erreichbar. Backup konnte nicht erstellt werden.");
     } finally {
@@ -618,7 +654,7 @@ export function EditorClient({
           <button
             onClick={() => void handleBackup()}
             disabled={backupLoading}
-            title="Komplette Website als .zip herunterladen"
+            title="Deine Website gehört dir: Lade sie jederzeit als .zip herunter und nimm sie mit, wohin du willst – keine Bindung, kein Lock-in."
             className="flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-60"
           >
             {backupLoading ? (
@@ -626,7 +662,7 @@ export function EditorClient({
             ) : (
               <Download className="h-4 w-4" />
             )}
-            <span className="hidden sm:inline">Backup (.zip)</span>
+            <span className="hidden sm:inline">Meine Website (.zip)</span>
           </button>
           <button
             onClick={handlePublish}
@@ -683,31 +719,65 @@ export function EditorClient({
                 className={`mb-6 rounded-xl border px-4 py-3 text-sm ${
                   deployState === "sending"
                     ? "border-amber-200 bg-amber-50 text-amber-800"
-                    : deployState === "building"
+                    : deployState === "building" || deployState === "slow"
                       ? "border-blue-200 bg-blue-50 text-blue-800"
-                      : "border-emerald-200 bg-emerald-50 text-emerald-800"
+                      : deployState === "failed"
+                        ? "border-red-200 bg-red-50 text-red-800"
+                        : "border-emerald-200 bg-emerald-50 text-emerald-800"
                 }`}
               >
                 {deployState === "sending" && (
                   <div className="flex items-center gap-2">
                     <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
                     <p className="font-medium">
-                      🟡 Änderungen werden übertragen …
+                      Änderungen werden übertragen …
                     </p>
                   </div>
                 )}
                 {deployState === "building" && (
                   <div className="flex items-start gap-2">
+                    <Loader2 className="h-4 w-4 mt-0.5 shrink-0 animate-spin" />
+                    <div className="flex-1">
+                      <p className="font-medium">
+                        Übertragen! Die Website wird gerade neu aufgebaut …
+                      </p>
+                      <p className="mt-1 text-blue-700/80">
+                        Ich prüfe den echten Stand und melde mich, sobald alles
+                        live ist – du musst nichts tun.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setDeployState("idle")}
+                      className="opacity-60 transition hover:opacity-100"
+                      aria-label="Hinweis schließen"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                )}
+                {deployState === "slow" && (
+                  <div className="flex items-start gap-2">
                     <Rocket className="mt-0.5 h-4 w-4 shrink-0" />
                     <div className="flex-1">
                       <p className="font-medium">
-                        🔵 Website wird neu aufgebaut (Dauer: ca. 45–60 Sek.) …
+                        Übertragen! Der Aufbau dauert diesmal länger als sonst.
                       </p>
                       <p className="mt-1 text-blue-700/80">
-                        Gleich ist alles fertig – die Vorschau lädt danach von
-                        allein neu.
+                        Deine Änderungen sind gespeichert. Schau einfach in ein
+                        paar Minuten auf deine Website und lade sie neu – oder
+                        lade gleich hier die Vorschau neu.
                       </p>
                       <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          onClick={() => {
+                            if (iframeRef.current) {
+                              iframeRef.current.src = iframeRef.current.src;
+                            }
+                          }}
+                          className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-500"
+                        >
+                          Vorschau neu laden
+                        </button>
                         <button
                           onClick={openLiveSite}
                           className="rounded-lg border border-blue-300 bg-white px-3 py-1.5 text-xs font-semibold text-blue-800 transition hover:bg-blue-100"
@@ -725,11 +795,35 @@ export function EditorClient({
                     </button>
                   </div>
                 )}
+                {deployState === "failed" && (
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                    <div className="flex-1">
+                      <p className="font-medium">
+                        Der Aufbau ist fehlgeschlagen – deine Website zeigt
+                        weiter den alten Stand.
+                      </p>
+                      <p className="mt-1 text-red-700/80">
+                        Deine Änderungen sind als Entwurf gespeichert und nichts
+                        ist verloren. Versuche es erneut oder melde dich bei
+                        deiner Agentur.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setDeployState("idle")}
+                      className="opacity-60 transition hover:opacity-100"
+                      aria-label="Hinweis schließen"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                )}
                 {deployState === "done" && (
                   <div className="flex items-center gap-2">
                     <CheckCircle2 className="h-4 w-4 shrink-0" />
                     <p className="flex-1 font-medium">
-                      🟢 Fertig! Ihre Website ist jetzt weltweit aktualisiert.
+                      Fertig! Deine Website ist jetzt überall aktualisiert –
+                      die Vorschau wurde neu geladen.
                     </p>
                     <button
                       onClick={() => setDeployState("idle")}
@@ -1234,9 +1328,11 @@ function UndoButton({ onUndo }: { onUndo: () => void }) {
 }
 
 const BANNER_FILE = "src/content/site.json";
-const BANNER_ENABLED_ID = `json:${BANNER_FILE}:site.banner.enabled`;
-const BANNER_VARIANT_ID = `json:${BANNER_FILE}:site.banner.variant`;
-const BANNER_TEXT_ID = `json:${BANNER_FILE}:site.banner.text`;
+// Pfade OHNE "site."-Vorsatz: site.json liegt flach (banner.enabled),
+// die Website liest sie als site.banner (getSite liefert die Datei direkt)
+const BANNER_ENABLED_ID = `json:${BANNER_FILE}:banner.enabled`;
+const BANNER_VARIANT_ID = `json:${BANNER_FILE}:banner.variant`;
+const BANNER_TEXT_ID = `json:${BANNER_FILE}:banner.text`;
 
 const BANNER_VARIANTS = [
   { id: "vacation", label: "🟡 Betriebsurlaub", pill: "bg-amber-500 text-white border-amber-500" },
@@ -1414,6 +1510,29 @@ function FieldEditor({
               rows={4}
               className={`${baseClass} resize-y`}
             />
+          )}
+
+          {field.type === "boolean" && (
+            <button
+              type="button"
+              role="switch"
+              aria-checked={value === "true"}
+              onClick={() => onChange(value === "true" ? "false" : "true")}
+              className={`relative h-6 w-11 shrink-0 rounded-full transition ${
+                value === "true" ? "bg-emerald-500" : "bg-zinc-300"
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
+                  value === "true" ? "left-[22px]" : "left-0.5"
+                }`}
+              />
+            </button>
+          )}
+          {field.type === "boolean" && (
+            <p className={`mt-1 text-xs font-medium ${value === "true" ? "text-emerald-700" : "text-zinc-400"}`}>
+              {value === "true" ? "AN" : "AUS"}
+            </p>
           )}
 
           <p

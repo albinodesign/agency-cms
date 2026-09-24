@@ -116,7 +116,8 @@ export default async function EditorPage({ params }: EditorPageProps) {
     }
 
     // Banner-Schnellschalter: Live-Werte aus site.json seeden (auch ohne Manifest-Felder),
-    // damit Schalter, Undo und Diff von Anfang an den echten Stand zeigen
+    // damit Schalter, Undo und Diff von Anfang an den echten Stand zeigen.
+    // Die Datei liegt flach (banner.enabled) – getSite() liefert sie direkt als "site".
     try {
       const bannerOctokit = createOctokit();
       const { text: siteText } = await getRepoFile(
@@ -125,23 +126,20 @@ export default async function EditorPage({ params }: EditorPageProps) {
         typedSite.repo_name,
         "src/content/site.json"
       );
-      const banner = (JSON.parse(siteText) as Record<string, unknown>)?.site as Record<
-        string,
-        unknown
-      > | null;
+      const siteData = JSON.parse(siteText) as Record<string, unknown>;
       const bannerData =
-        banner && typeof banner.banner === "object" && banner.banner !== null
-          ? (banner.banner as Record<string, unknown>)
+        siteData && typeof siteData.banner === "object" && siteData.banner !== null
+          ? (siteData.banner as Record<string, unknown>)
           : null;
       if (bannerData) {
         if (typeof bannerData.enabled === "boolean") {
-          liveValues["json:src/content/site.json:site.banner.enabled"] = String(bannerData.enabled);
+          liveValues["json:src/content/site.json:banner.enabled"] = String(bannerData.enabled);
         }
         if (typeof bannerData.variant === "string") {
-          liveValues["json:src/content/site.json:site.banner.variant"] = bannerData.variant;
+          liveValues["json:src/content/site.json:banner.variant"] = bannerData.variant;
         }
         if (typeof bannerData.text === "string") {
-          liveValues["json:src/content/site.json:site.banner.text"] = bannerData.text;
+          liveValues["json:src/content/site.json:banner.text"] = bannerData.text;
         }
       }
     } catch {

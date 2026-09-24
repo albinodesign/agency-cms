@@ -388,6 +388,8 @@ export async function POST(request: Request) {
       message: `${committedFiles.length} Datei(en) veröffentlicht.${skippedNote}`,
       publishedFields: committedFields,
       publishedFiles: committedFiles,
+      // Echter Versions-Stempel für den Aufbau-Check (Vercel meldet den Bau-Status daran)
+      commitSha: lastCommitSha,
     });
   } catch (err) {
     console.error("Publish fehlgeschlagen:", err);

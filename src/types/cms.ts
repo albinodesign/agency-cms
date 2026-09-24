@@ -6,7 +6,8 @@ export type FieldType =
   | "email"
   | "phone"
   | "url"
-  | "date";
+  | "date"
+  | "boolean";
 
 export interface ManifestField {
   /** Eindeutige Feld-ID, z. B. "hero.title" */

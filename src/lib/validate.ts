@@ -51,6 +51,11 @@ export function validateDraftValue(
         return `"${value}" ist kein gültiges Datum (Format: JJJJ-MM-TT).`;
       }
       return null;
+    case "boolean":
+      if (trimmed !== "true" && trimmed !== "false") {
+        return `"${value}" ist kein gültiger An/Aus-Wert (erlaubt: an oder aus).`;
+      }
+      return null;
     default:
       return null;
   }

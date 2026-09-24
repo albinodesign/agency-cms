@@ -73,6 +73,7 @@ const ALLOWED_FIELD_TYPES: FieldType[] = [
   "phone",
   "url",
   "date",
+  "boolean",
 ];
 
 function pickString(...values: unknown[]): string | undefined {
