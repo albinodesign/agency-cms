@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
-import { FileText, Loader2, Paperclip, Plus, Send, Sparkles, Undo2, X } from "lucide-react";
+import { FileText, Loader2, Paperclip, Plus, Send, Sparkles, X } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import type { DraftMap, ManifestField } from "@/types/cms";
 
@@ -69,12 +69,6 @@ export function ChatDrawer({
   const [input, setInput] = useState("");
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [historyDone, setHistoryDone] = useState(false);
-  // Rückgängig-Info je Nachricht (DB-ID aus dem Verlauf oder Gesprächs-Fallback
-  // für frische Antworten) plus Anzahl der von ihr erzeugten Entwürfe.
-  const [undoInfo, setUndoInfo] = useState<
-    Record<string, { dbId?: string; conversationId?: string; anzahl: number }>
-  >({});
-  const [undoingId, setUndoingId] = useState<string | null>(null);
   // Hochgeladene Anhänge (Bilder/PDFs), werden mit der nächsten Nachricht mitgeschickt
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [uploadingFile, setUploadingFile] = useState(false);
@@ -113,28 +107,15 @@ export function ChatDrawer({
       .then(async (res) => {
         const body = (await res.json()) as {
           conversation?: { id: string } | null;
-          messages?: Array<{
-            id?: string;
-            role: string;
-            text: string;
-            dateien?: Array<{ name?: string; url?: string; mediaType?: string }>;
-            entwuerfeAnzahl?: number;
-          }>;
+          messages?: Array<{ role: string; text: string; dateien?: Array<{ name?: string; url?: string; mediaType?: string }> }>;
         };
         if (body.conversation && Array.isArray(body.messages) && body.messages.length > 0) {
           convRef.current = body.conversation.id;
-          const info: Record<string, { dbId?: string; anzahl: number }> = {};
           setMessages(
-            body.messages.map((m, i) => {
-              const clientId = `hist-${i}`;
-              const anzahl = typeof m.entwuerfeAnzahl === "number" ? m.entwuerfeAnzahl : 0;
-              if (m.role === "assistant" && typeof m.id === "string" && anzahl > 0) {
-                info[clientId] = { dbId: m.id, anzahl };
-              }
-              return {
-                id: clientId,
-                role: m.role as "user" | "assistant",
-                parts: [
+            body.messages.map((m, i) => ({
+              id: `hist-${i}`,
+              role: m.role as "user" | "assistant",
+              parts: [
                 ...(m.text ? [{ type: "text" as const, text: m.text }] : []),
                 ...(Array.isArray(m.dateien)
                   ? m.dateien
@@ -142,9 +123,8 @@ export function ChatDrawer({
                       .map((d) => ({ type: "file" as const, url: d.url as string, mediaType: d.mediaType ?? "", filename: d.name ?? "" }))
                   : []),
               ],
-              };
-            }));
-          setUndoInfo(info);
+            }))
+          );
         }
       })
       .catch(() => {
@@ -182,63 +162,6 @@ export function ChatDrawer({
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, status]);
-
-  // Frische Antworten ohne Verlaufs-ID bekommen ihre Entwurfsanzahl aus den
-  // Werkzeug-Ergebnissen (Rückgängig läuft dann über das Gespräch).
-  useEffect(() => {
-    setUndoInfo((prev) => {
-      const next = { ...prev };
-      let changed = false;
-      for (const msg of messages) {
-        if (msg.role !== "assistant" || next[msg.id]) continue;
-        let anzahl = 0;
-        for (const part of (msg.parts ?? []) as Part[]) {
-          if (!part.type.startsWith("tool-") || part.state !== "output-available") continue;
-          const output = part.output as { art?: string } | null;
-          if (output && typeof output === "object" && (output.art === "feld" || output.art === "frei" || output.art === "code")) {
-            anzahl += 1;
-          }
-        }
-        if (anzahl > 0 && convRef.current) {
-          next[msg.id] = { conversationId: convRef.current, anzahl };
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [messages]);
-
-  /** Antwort rückgängig: Entwürfe + Nachricht löschen (direkt, ohne Rückfrage). */
-  async function undoMessage(clientId: string) {
-    const entry = undoInfo[clientId];
-    if (!entry || undoingId) return;
-    setUndoingId(clientId);
-    try {
-      const res = await fetch("/api/ai/undo", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          entry.dbId ? { messageId: entry.dbId } : { conversationId: entry.conversationId }
-        ),
-      });
-      const body = (await res.json()) as { error?: string; message?: string };
-      if (!res.ok) {
-        onError(body.error ?? "Rückgängig fehlgeschlagen.");
-        return;
-      }
-      setMessages((prev) => prev.filter((m) => m.id !== clientId));
-      setUndoInfo((prev) => {
-        const next = { ...prev };
-        delete next[clientId];
-        return next;
-      });
-      onSuccess(body.message ?? "Rückgängig gemacht.");
-    } catch {
-      onError("Server nicht erreichbar. Bitte später erneut versuchen.");
-    } finally {
-      setUndoingId(null);
-    }
-  }
 
   /** Statuszeile je KI-Antwort aus den Schreib-Ergebnissen (hinweis/veroeffentlichbar). */
   function messageStatus(msg: { parts?: unknown }): { ton: "warn" | "ok"; text: string } | null {
@@ -338,7 +261,6 @@ export function ChatDrawer({
     convRef.current = newConversationId();
     appliedRef.current = new Set();
     setAttachments([]);
-    setUndoInfo({});
     setMessages([]);
   }
 
@@ -442,34 +364,17 @@ export function ChatDrawer({
                   {msg.role === "assistant" &&
                     (() => {
                       const st = messageStatus(msg);
-                      const undo = undoInfo[msg.id];
-                      if (!st && !undo) return null;
+                      if (!st) return null;
                       return (
-                        <div className="mt-2 space-y-1.5">
-                          {st && (
-                            <p
-                              className={`rounded-lg border px-2.5 py-1.5 text-xs ${
-                                st.ton === "warn"
-                                  ? "border-amber-200 bg-amber-50 text-amber-800"
-                                  : "border-emerald-200 bg-emerald-50 text-emerald-800"
-                              }`}
-                            >
-                              {st.text}
-                            </p>
-                          )}
-                          {undo && undo.anzahl > 0 && (
-                            <button
-                              type="button"
-                              onClick={() => void undoMessage(msg.id)}
-                              disabled={undoingId === msg.id || busy}
-                              title="Entwürfe dieser Antwort verwerfen und Nachricht löschen"
-                              className="flex items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2 py-1 text-xs font-medium text-zinc-500 transition hover:bg-zinc-100 disabled:opacity-60"
-                            >
-                              <Undo2 className="h-3 w-3" />
-                              {undoingId === msg.id ? "Wird rückgängig …" : "Rückgängig"}
-                            </button>
-                          )}
-                        </div>
+                        <p
+                          className={`mt-2 rounded-lg border px-2.5 py-1.5 text-xs ${
+                            st.ton === "warn"
+                              ? "border-amber-200 bg-amber-50 text-amber-800"
+                              : "border-emerald-200 bg-emerald-50 text-emerald-800"
+                          }`}
+                        >
+                          {st.text}
+                        </p>
                       );
                     })()}
                 </div>

@@ -19,7 +19,7 @@ npm run lint       # ESLint (eslint-config-next, core-web-vitals + typescript)
 npm run test       # Alle Abnahme-Suiten (reparatur1/1b/1c/1d, ohne Netz/Produktion)
 ```
 
-Es gibt kein allgemeines Test-Framework im Projekt; Qualitätssicherung erfolgt über `npm run lint` und `npm run build` (TypeScript `strict` ist aktiviert) sowie die Abnahme-Skripte `scripts/reparatur1-check.mjs`, `scripts/reparatur1b-publish-check.mjs`, `scripts/reparatur1c-check.mjs`, `scripts/reparatur1d-check.mjs` und `scripts/chat-undo-check.mjs` (kompilieren echte Routen-/Werkzeugfunktionen mit lokalen Adaptern, jede fehlgeschlagene Assertion gibt Fehler-Exit-Code). Alle Befehle müssen nach einer Änderung fehlerfrei durchlaufen.
+Es gibt kein allgemeines Test-Framework im Projekt; Qualitätssicherung erfolgt über `npm run lint` und `npm run build` (TypeScript `strict` ist aktiviert) sowie die Abnahme-Skripte `scripts/reparatur1-check.mjs`, `scripts/reparatur1b-publish-check.mjs`, `scripts/reparatur1c-check.mjs` und `scripts/reparatur1d-check.mjs` (kompilieren echte Routen-/Werkzeugfunktionen mit lokalen Adaptern, jede fehlgeschlagene Assertion gibt Fehler-Exit-Code). Alle Befehle müssen nach einer Änderung fehlerfrei durchlaufen.
 
 ## Umgebungsvariablen
 
