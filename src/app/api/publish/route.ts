@@ -11,12 +11,14 @@ import {
   extractRawFields,
   getBannerProblems,
   isAllowedFieldJsonFile,
+  makeCoveragePredicate,
   parseFreeDraftIdSafe,
   resolveEditType,
   validateBannerValue,
   validateFieldTargets,
   validateFullJsonDraft,
   validateListStructures,
+  validateScalarTypePreservation,
 } from "@/lib/content-guard";
 import type { ResolvedTarget, TypeEntry } from "@/lib/content-guard";
 import {
@@ -536,9 +538,12 @@ export async function POST(request: Request) {
     }
 
     // Listen-Strukturen im GESAMTEN Kandidaten (gemeinsame Prüfung wie im
-    // Chat): kein Sonderweg für vollständige Dateien – feste Listen wachsen
-    // nicht, dynamische nur modellvollständig am Ende.
-    strictErrors.push(...validateListStructures(parsedJson, candidateJson));
+    // Chat): kein Sonderweg für vollständige Dateien – Modelle gelten für
+    // alle endgültigen Elemente, feste Listen behalten exakt ihre Form,
+    // Typen außerhalb der Feldliste bleiben erhalten.
+    const isCovered = makeCoveragePredicate(typeMap);
+    strictErrors.push(...validateListStructures(parsedJson, candidateJson, isCovered));
+    strictErrors.push(...validateScalarTypePreservation(parsedJson, candidateJson, isCovered));
 
     const blockingErrors = [...targetErrors, ...candidateErrors, ...strictErrors, ...valueErrors];
     if (blockingErrors.length > 0) {

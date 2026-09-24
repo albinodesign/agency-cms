@@ -272,12 +272,40 @@ unverändert.
 - `npm run lint` → sauber (0 Fehler, 0 Warnungen).
 - `npm run build` → erfolgreich (alle 13 Seiten).
 - `npm run test` → 32/32 (1) + 40/40 (1b) + 40/40 (1c mit korrigiertem R-R3)
-  + 60/60 (1d: 17 Baustein-, 28 Publish-, 15 Chat-Assertions). Jede
+  + 77/77 (1d: Baustein-, Publish-, Chat- und E-Restlücken-Assertions). Jede
   fehlgeschlagene Assertion erzeugt Fehler-Exit-Code (ok-Muster).
 - Vor der Reparatur reproduziert: 15/40 bestanden (25 Fehler: alle vier
   Voll-Datei-Umgehungen, 4. Bewertung angenommen, FAQ-Antwort abgewiesen,
   Banner-party per Feld-ID angenommen, feste Liste im Chat gespeichert,
-  Banner-Hinweis bei "true" unterschlagen).
+  Banner-Hinweis bei "true" unterschlagen); nach 29f6da5 zusätzlich 10
+  E-Fehler (Modell-Lücke ohne Wachstum, Typwechsel außerhalb Feldliste,
+  Strukturvarianten, Status nach Korrektur).
+
+### Nachtrag nach 29f6da5: zwei unabhängig nachgewiesene Restlücken (behoben)
+1. **Bestehende Inhalte vollständig:** Bekannte Modelle gelten für ALLE
+   endgültigen Elemente (`validateNewListElement` je Element, auch ohne
+   Wachstum – volle FAQ ohne `antwort` → 400). Feste Listenelemente behalten
+   exakt ihre Form (`compareFixedShape`: fremde/fehlende Schlüssel und
+   Typwechsel wie Zahl→Text abgewiesen, inkl. Objekt↔Wert-Tausch).
+   Typtreue außerhalb der Feldliste (`validateScalarTypePreservation` für den
+   ganzen Kandidaten). Abgedeckte Pfade (Manifestfeld, Banner-Bereich,
+   Modellliste via `makeCoveragePredicate`) sind ausgenommen – für sie gelten
+   ihre eigenen Kandidaten-Regeln, sodass legitime Korrekturen (z. B.
+   deklariertes Zahlfeld) nicht blockieren. Gültige normale Bearbeitungen
+   (gleichartige Wertänderungen, auch außerhalb der Feldliste) bleiben
+   möglich. Dokumentierte Grenzen: neue Skalarschlüssel in reinen Objekten,
+   Kürzen dynamischer Listen und Entfall nicht deklarierter Schlüssel bleiben
+   zulässig bzw. Entwurf.
+2. **Entwurfsstatus nach jeder Änderung:** `statusAfterStore` bestimmt den
+   Status aus dem zusammengesetzten Stand (Live + alle Entwürfe) in beiden
+   Chat-Zweigen (Feld-ID und datei+pfad): fehlende Modellschlüssel,
+   Struktur-/Typabweichungen und Banner-Lücken ergeben `hinweis` +
+   `veroeffentlichbar=false` – auch bei Korrekturen (Frage korrigiert ohne
+   Antwort, Banner-Einschalten ohne Text, Typwechsel Zahl→Text). Ein
+   fehlender Hinweis beweist keine Veröffentlichungsfähigkeit; maßgeblich
+   bleibt Publish. Belegt: E-S1–E-S6 (+E-S2b), E-C1–E-C4 mit Endzustand
+   (Repo-Inhalt, Commits, Entwurfsmengen), Erfolgsgegenstücke und
+   Chat→Publish-Spiegel (E-C4b).
 
 ### Tatsächlich unterstützte Modellregeln und verbleibende Einschränkungen
 - Unterstützt: Dateisperre, sichere Pfade, Manifest-Ziele, deklarierte

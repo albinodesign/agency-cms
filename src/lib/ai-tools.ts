@@ -32,10 +32,13 @@ import {
   getBannerProblems,
   isAllowedFieldJsonFile,
   isPlainObject,
+  makeCoveragePredicate,
   missingAppendKeys,
   parseFreeDraftIdSafe,
   validateBannerValue,
   validateJsonPath,
+  validateListStructures,
+  validateScalarTypePreservation,
 } from "./content-guard";
 import type { TypeEntry } from "./content-guard";
 import { validateDraftValue, validateJsonValue } from "./validate";
@@ -181,14 +184,47 @@ export function buildAiTools(deps: AiToolsDeps) {
     return { live, candidate };
   }
 
-  /** Banner-Hinweis nach einer Speicherung (gemeinsame Prüfung wie im Publish). */
-  async function bannerHint(datei: string): Promise<string | null> {
-    if (datei !== SITE_JSON) return null;
+  /**
+   * Bestimmt den Entwurfsstatus aus dem zusammengesetzten Stand (Live plus
+   * ALLE gespeicherten Entwürfe, inkl. der gerade gespeicherten Änderung):
+   * Fehlende Modellschlüssel, Struktur-/Typabweichungen und Banner-Lücken
+   * führen zu hinweis + veroeffentlichbar=false – auch bei Korrekturen und
+   * über beide Zugriffswege (Feld-ID oder datei+pfad). Ein fehlender Hinweis
+   * allein beweist keine Veröffentlichungsfähigkeit; maßgeblich bleibt Publish.
+   */
+  async function statusAfterStore(
+    datei: string,
+    pfad: string
+  ): Promise<{ hinweis: string | null; veroeffentlichbar: boolean }> {
     const built = await buildCandidate(datei);
-    if ("fehler" in built) return null;
-    const parts = missingBannerParts(built.candidate);
-    if (parts.length === 0) return null;
-    return `Banner noch unvollständig – es fehlt noch: ${parts.join(", ")}. Erst dann veröffentlichen. Sage das dem Kunden ehrlich.`;
+    if ("fehler" in built) return { hinweis: null, veroeffentlichbar: true };
+    let hinweis: string | null = null;
+    const pp = parsePathSafe(pfad);
+    if (pp.ok) {
+      const missing = missingAppendKeys(datei, pp.segments, built.live, built.candidate);
+      if (missing.length > 0) {
+        hinweis = `Noch unvollständig – ergänze noch als eigene Entwürfe: ${missing.join(", ")}. Erst dann veröffentlichen. Sage das dem Kunden ehrlich.`;
+      }
+    }
+    if (hinweis === null) {
+      const pred = makeCoveragePredicate(typeMap);
+      const liveM = new Map([[datei, built.live]]);
+      const candM = new Map([[datei, built.candidate]]);
+      const struktur = [
+        ...validateListStructures(liveM, candM, pred),
+        ...validateScalarTypePreservation(liveM, candM, pred),
+      ];
+      if (struktur.length > 0) {
+        hinweis = `Noch nicht veröffentlichbar: ${struktur[0]}`;
+      }
+    }
+    if (hinweis === null && datei === SITE_JSON) {
+      const parts = missingBannerParts(built.candidate);
+      if (parts.length > 0) {
+        hinweis = `Banner noch unvollständig – es fehlt noch: ${parts.join(", ")}. Erst dann veröffentlichen. Sage das dem Kunden ehrlich.`;
+      }
+    }
+    return { hinweis, veroeffentlichbar: hinweis === null };
   }
 
   return {
@@ -314,15 +350,15 @@ export function buildAiTools(deps: AiToolsDeps) {
           }
           const { error } = await store.storeDraft(site.id, feldId, wert);
           if (error) return { fehler: `Entwurf konnte nicht gespeichert werden: ${error.message}` };
-          const feldHinweis = await bannerHint(field.file);
+          const status = await statusAfterStore(field.file, field.path);
           return {
             art: "feld",
             feldId,
             wert,
             vorschau: "sofort",
             meldung: `"${field.label}" als Entwurf gespeichert, Kunde sieht es sofort in der Vorschau.`,
-            hinweis: feldHinweis,
-            veroeffentlichbar: feldHinweis === null,
+            hinweis: status.hinweis,
+            veroeffentlichbar: status.veroeffentlichbar,
           };
         }
         if (datei && pfad) {
@@ -374,41 +410,16 @@ export function buildAiTools(deps: AiToolsDeps) {
           const freeId = `${FREE_DRAFT_PREFIX}${datei}:${pfad}`;
           const { error } = await store.storeDraft(site.id, freeId, wert);
           if (error) return { fehler: `Entwurf konnte nicht gespeichert werden: ${error.message}` };
-          // Ehrlichkeit bei unvollständigen Ergänzungen: fehlende Angaben nennen.
-          // Erlaubte Arbeitsentwürfe dürfen unvollständig sein (mit
-          // Fehlend-Liste), veröffentlichbar erst vollständig.
-          let hinweis: string | null = null;
-          if (verdict.creation?.kind === "append" && pp.ok) {
-            const withNew = structuredClone(built.candidate);
-            try {
-              setByPath(withNew, pfad, convertEditValue(datei, pfad, wert, typeMap, built.live));
-              const missing = missingAppendKeys(datei, pp.segments, built.live, withNew);
-              if (missing.length > 0) {
-                hinweis = `Noch unvollständig – ergänze noch als eigene Entwürfe: ${missing.join(", ")}. Erst dann veröffentlichen. Sage das dem Kunden ehrlich.`;
-              }
-            } catch {
-              // Struktur passt nicht – Publish prüft streng.
-            }
-          }
-          if (verdict.creation?.kind === "banner" && datei === SITE_JSON) {
-            const after = structuredClone(built.candidate);
-            try {
-              setByPath(after, pfad, convertEditValue(datei, pfad, wert, typeMap, built.live));
-              const parts = missingBannerParts(after);
-              if (parts.length > 0) {
-                hinweis = `Banner noch unvollständig – es fehlt noch: ${parts.join(", ")}. Erst dann veröffentlichen. Sage das dem Kunden ehrlich.`;
-              }
-            } catch {
-              // Publish prüft streng.
-            }
-          }
+          // Status aus dem zusammengesetzten Entwurf (gilt auch für
+          // Korrekturen begonnener Einträge, nicht nur frische Anhänge).
+          const status = await statusAfterStore(datei, pfad);
           return {
             art: "frei",
             feldId: freeId,
             vorschau: "nach Veröffentlichen",
             meldung: `Entwurf für ${datei} (${pfad}) gespeichert, sichtbar nach dem Veröffentlichen.`,
-            hinweis,
-            veroeffentlichbar: hinweis === null,
+            hinweis: status.hinweis,
+            veroeffentlichbar: status.veroeffentlichbar,
           };
         }
         return { fehler: "Bitte feldId oder datei+pfad angeben." };

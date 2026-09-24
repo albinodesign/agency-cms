@@ -651,6 +651,135 @@ module.exports = Object.assign({}, real, {
     const banner = mirror.status === 200 ? JSON.parse(mirror.repo.get("src/content/site.json")).banner : null;
     ok(mirror.status === 200 && banner && banner.enabled === true, "C-B2c Chat-Banner gemeinsam veröffentlichbar (Boolean)");
   }
+
+  // ---------- Teil E: Restlücken nach 29f6da5 ----------
+  {
+    // E-S1: volle faq.json verliert bei vorhandenem Eintrag das Pflichtfeld
+    // antwort (Listenlänge bleibt 1) -> 400 ohne Write, Entwürfe bleiben.
+    const faq1 = () => ({
+      "src/content/site.json": JSON.stringify({ titel: "Firma" }),
+      "src/content/pages/home.json": JSON.stringify({ hero: { title: "Alt" } }),
+      "src/content/pages/preise.json": JSON.stringify({ preis: { betrag: 10 } }),
+      "src/content/pages/faq.json": JSON.stringify({ items: [{ frage: "Q1", antwort: "A1" }] }),
+    });
+    const gekuerzt = { items: [{ frage: "Q1" }] };
+    const r = await runScenario({
+      manifest: FAQ_MANIFEST,
+      files: faq1(),
+      drafts: [],
+      codeDrafts: [["src/content/pages/faq.json", JSON.stringify(gekuerzt)]],
+    });
+    ok(r.status === 400 && /antwort/.test(r.body.error || "") && r.commits.length === 0, "E-S1 volle FAQ ohne antwort -> 400 ohne Write");
+    ok(r.codeLeft === 1, "E-S1 Entwurf bleibt");
+    ok(r.repo.get("src/content/pages/faq.json") === faq1()["src/content/pages/faq.json"], "E-S1 Live-Datei unverändert");
+  }
+  {
+    // E-S2: rating (nicht im Manifest) Zahl 5 -> String "5" per voller Datei.
+    const home = demoHome();
+    home.testimonials.items[0].rating = "5";
+    const r = await runScenario({
+      manifest: FAQ_MANIFEST,
+      files: DEMO_FILES(),
+      drafts: [],
+      codeDrafts: [["src/content/pages/home.json", JSON.stringify(home)]],
+    });
+    ok(r.status === 400 && /Typ/.test(r.body.error || "") && r.commits.length === 0, "E-S2 Typwechsel Zahl->Text außerhalb Feldliste -> 400 ohne Write");
+    ok(r.codeLeft === 1, "E-S2 Entwurf bleibt");
+    // E-S2b: Typwechsel außerhalb von Listen per voller Datei (titel undeclared).
+    const rTitel = await runScenario({
+      manifest: FAQ_MANIFEST,
+      files: DEMO_FILES(),
+      drafts: [],
+      codeDrafts: [["src/content/site.json", JSON.stringify({ titel: 5 })]],
+    });
+    ok(rTitel.status === 400 && /Typ/.test(rTitel.body.error || "") && rTitel.commits.length === 0, "E-S2b Typwechsel Text->Zahl außerhalb Listen -> 400 ohne Write");
+  }
+  {
+    // E-S3/E-S4: gültige normale Bearbeitungen per voller Datei bleiben möglich.
+    const faqNeu = { items: [{ frage: "Q1", antwort: "A1" }, { frage: "Q2", antwort: "Aktualisiert" }] };
+    const r = await runScenario({
+      manifest: FAQ_MANIFEST,
+      files: FAQ_FILES(),
+      drafts: [],
+      codeDrafts: [["src/content/pages/faq.json", JSON.stringify(faqNeu)]],
+    });
+    const antwort = r.status === 200 ? JSON.parse(r.repo.get("src/content/pages/faq.json")).items[1].antwort : null;
+    ok(r.status === 200 && antwort === "Aktualisiert", "E-S3 gleichartige Textänderung per voller Datei -> 200");
+    const home = demoHome();
+    home.testimonials.items[0].quote = "Aktualisiert.";
+    const r2 = await runScenario({
+      manifest: FAQ_MANIFEST,
+      files: DEMO_FILES(),
+      drafts: [],
+      codeDrafts: [["src/content/pages/home.json", JSON.stringify(home)]],
+    });
+    const quote = r2.status === 200 ? JSON.parse(r2.repo.get("src/content/pages/home.json")).testimonials.items[0].quote : null;
+    ok(r2.status === 200 && quote === "Aktualisiert.", "E-S4 gleichartige Textänderung außerhalb Feldliste -> 200");
+  }
+  {
+    // E-S5/E-S6: verwandte Strukturvarianten in fester Liste (fremder/fehlender Schlüssel).
+    const extra = demoHome();
+    extra.testimonials.items[0].spitzname = "X";
+    const r = await runScenario({
+      manifest: FAQ_MANIFEST,
+      files: DEMO_FILES(),
+      drafts: [],
+      codeDrafts: [["src/content/pages/home.json", JSON.stringify(extra)]],
+    });
+    ok(r.status === 400 && /Struktur/.test(r.body.error || "") && r.commits.length === 0, "E-S5 fremder Schlüssel in fester Liste -> 400 ohne Write");
+    const fehlt = demoHome();
+    delete fehlt.testimonials.items[0].author;
+    const r2 = await runScenario({
+      manifest: FAQ_MANIFEST,
+      files: DEMO_FILES(),
+      drafts: [],
+      codeDrafts: [["src/content/pages/home.json", JSON.stringify(fehlt)]],
+    });
+    ok(r2.status === 400 && /Struktur/.test(r2.body.error || "") && r2.commits.length === 0, "E-S6 fehlender Schlüssel in fester Liste -> 400 ohne Write");
+  }
+  {
+    // E-C1: Frage speichern, dieselbe Frage korrigieren (ohne Antwort) ->
+    // Status aus dem zusammengesetzten Entwurf: antwort fehlt, nicht veröffentlichbar.
+    const h = chatHarness({ files: FAQ_FILES(), drafts: [], serverFields: [] });
+    const q = await h.tools.schreibeInhalt.execute({ datei: "src/content/pages/faq.json", pfad: "items[2].frage", wert: "Neu?" });
+    ok(!q.fehler && q.veroeffentlichbar === false && /antwort/i.test(q.hinweis || ""), "E-C1a Frage gespeichert: antwort fehlt, nicht veröffentlichbar");
+    const fix = await h.tools.schreibeInhalt.execute({ datei: "src/content/pages/faq.json", pfad: "items[2].frage", wert: "Neu korrigiert?" });
+    ok(!fix.fehler && fix.veroeffentlichbar === false && /antwort/i.test(fix.hinweis || ""), "E-C1b Korrektur ohne Antwort: weiterhin antwort fehlend, nicht veröffentlichbar");
+    // E-C2: Korrektur im vollständigen Eintrag bleibt veröffentlichbar.
+    await h.tools.schreibeInhalt.execute({ datei: "src/content/pages/faq.json", pfad: "items[2].antwort", wert: "Neue Antwort." });
+    const fix2 = await h.tools.schreibeInhalt.execute({ datei: "src/content/pages/faq.json", pfad: "items[2].frage", wert: "Neu final?" });
+    ok(!fix2.fehler && fix2.veroeffentlichbar === true && (fix2.hinweis === null || fix2.hinweis === undefined), "E-C2 Korrektur im vollständigen Eintrag: veröffentlichbar");
+  }
+  {
+    // E-C3: Banner-Korrektur auf bestehendem Pfad: nach Einschalten fehlt
+    // weiterhin der Text (Status aus dem zusammengesetzten Entwurf).
+    const h = chatHarness({
+      files: Object.assign(DEMO_FILES(), { "src/content/site.json": JSON.stringify({ titel: "F", banner: { enabled: false, variant: "info" } }) }),
+      drafts: [],
+      serverFields: BANNER_FIELDS,
+    });
+    const mid = await h.tools.schreibeInhalt.execute({ datei: "src/content/site.json", pfad: "banner.enabled", wert: "true" });
+    ok(!mid.fehler && mid.veroeffentlichbar === false && /Text/.test(mid.hinweis || ""), "E-C3 Banner nach Einschalten: Text fehlt weiterhin, nicht veröffentlichbar");
+    const done = await h.tools.schreibeInhalt.execute({ datei: "src/content/site.json", pfad: "banner.text", wert: "Hallo" });
+    ok(!done.fehler && done.veroeffentlichbar === true, "E-C3b Banner vollständig: veröffentlichbar");
+  }
+  {
+    // E-C4: Typwechsel außerhalb der Feldliste wird im Status ehrlich markiert.
+    const h = chatHarness({
+      files: Object.assign(DEMO_FILES(), { "src/content/pages/preise.json": JSON.stringify({ preis: { betrag: 10 } }) }),
+      drafts: [],
+      serverFields: [],
+    });
+    const bad = await h.tools.schreibeInhalt.execute({ datei: "src/content/pages/preise.json", pfad: "preis.betrag", wert: "fünf" });
+    ok(!bad.fehler && bad.veroeffentlichbar === false && /Typ/.test(bad.hinweis || ""), "E-C4 Typwechsel Zahl->Text: gespeichert, aber nicht veröffentlichbar");
+    const mirror = await runScenario({
+      manifest: FAQ_MANIFEST,
+      files: DEMO_FILES(),
+      drafts: h.stored.map((d) => [d.field_id, d.value]),
+      codeDrafts: [],
+    });
+    ok(mirror.status === 400 && mirror.commits.length === 0, "E-C4b Publish lehnt Typwechsel ab (400 ohne Write)");
+  }
 }
 
 main()
