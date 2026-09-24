@@ -307,6 +307,18 @@ unverändert.
    (Repo-Inhalt, Commits, Entwurfsmengen), Erfolgsgegenstücke und
    Chat→Publish-Spiegel (E-C4b).
 
+### Übernahme FAQ-Endstandkorrektur (Basis 2bd1a1f, Paket CMS-Abschlusskorrektur-2bd1a1f.zip)
+- Lücke: Eine gekürzte FAQ-Liste konnte unvollständige Einträge einschleusen,
+  weil das Modell nur bei gleicher Länge und Wachstum geprüft wurde.
+- Korrektur (ausschließlich übernommen): Das Listenmodell gilt vor der
+  Längenunterscheidung für alle endgültigen Elemente (`content-guard.ts`);
+  Tests E-S7 (Ablehnung ohne `antwort`, null Writes, Daten/Entwürfe erhalten)
+  und E-S8 (gültiges Kürzen bleibt 200) in `reparatur1d-check.mjs`.
+- Ergebnisse nach Übernahme: `npm run test` 193/193 (32+40+40+81),
+  `npm run lint` sauber, `npm run build` erfolgreich, unabhängige
+  Gegenprüfung (`unabhaengige-pruefung.cjs` + `demo-original-fixture`)
+  27/27 bestanden.
+
 ### Tatsächlich unterstützte Modellregeln und verbleibende Einschränkungen
 - Unterstützt: Dateisperre, sichere Pfade, Manifest-Ziele, deklarierte
   Typen/Längen (Aliase erben), Banner-Modell (Enum, 160 Zeichen,

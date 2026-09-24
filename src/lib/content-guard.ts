@@ -1088,14 +1088,16 @@ export function validateListStructures(
       }
       if (!Array.isArray(liveArr)) continue;
       const model = findListModel(file, spot.canonical);
+      // Das Modell gilt für den gesamten Endstand, auch wenn die Liste
+      // gekürzt wird. Wachstum und Länge regeln anschließend nur den Umbau.
+      if (model) {
+        for (let i = 0; i < candArr.length; i += 1) {
+          errors.push(...validateNewListElement(file, `${label}[${i}]`, model, candArr[i]));
+        }
+      }
       if (candArr.length === liveArr.length) {
-        // Gleiche Länge: Modell gilt für JEDES Element (nicht nur Anhänge),
-        // feste Listen behalten exakt ihre Form.
-        if (model) {
-          for (let i = 0; i < candArr.length; i += 1) {
-            errors.push(...validateNewListElement(file, `${label}[${i}]`, model, candArr[i]));
-          }
-        } else {
+        // Feste Listen behalten exakt ihre Form.
+        if (!model) {
           errors.push(...compareFixedShape(liveArr, candArr, file, spot.segments, isCovered));
         }
         continue;
@@ -1117,9 +1119,6 @@ export function validateListStructures(
             `Die Liste "${label}" in "${file}" darf nur am Ende ergänzt werden (bestehende Einträge unverändert lassen).`
           );
           continue;
-        }
-        for (let i = liveArr.length; i < candArr.length; i += 1) {
-          errors.push(...validateNewListElement(file, label, model, candArr[i]));
         }
         continue;
       }

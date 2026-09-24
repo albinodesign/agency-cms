@@ -654,6 +654,30 @@ module.exports = Object.assign({}, real, {
 
   // ---------- Teil E: Restlücken nach 29f6da5 ----------
   {
+    // Kürzen ist erlaubt; die verbleibenden Einträge brauchen trotzdem
+    // alle Modellangaben. Keine Umgehung durch Änderung der Listenlänge.
+    const file = "src/content/pages/faq.json";
+    const files = FAQ_FILES();
+    const bad = await runScenario({
+      manifest: FAQ_MANIFEST,
+      files,
+      drafts: [],
+      codeDrafts: [[file, JSON.stringify({ items: [{ frage: "Q1" }] })]],
+    });
+    ok(bad.status === 400 && /antwort/.test(bad.body.error || "") && bad.commits.length === 0,
+      "E-S7 gekürzte FAQ ohne Pflichtfeld -> 400 ohne Write");
+    ok(bad.codeLeft === 1, "E-S7 vollständiger Datei-Entwurf bleibt erhalten");
+    ok(bad.repo.get(file) === files[file], "E-S7 Live-Datei bleibt unverändert");
+    const good = await runScenario({
+      manifest: FAQ_MANIFEST,
+      files: FAQ_FILES(),
+      drafts: [],
+      codeDrafts: [[file, JSON.stringify({ items: [{ frage: "Q1", antwort: "A1" }] })]],
+    });
+    ok(good.status === 200 && JSON.parse(good.repo.get(file)).items.length === 1,
+      "E-S8 gültige gekürzte FAQ bleibt veröffentlichbar");
+  }
+  {
     // E-S1: volle faq.json verliert bei vorhandenem Eintrag das Pflichtfeld
     // antwort (Listenlänge bleibt 1) -> 400 ohne Write, Entwürfe bleiben.
     const faq1 = () => ({
