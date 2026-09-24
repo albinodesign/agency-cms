@@ -151,10 +151,9 @@ Setup in 3 Schritten:
    Modell wechseln = nur die Zeile `AI_MODEL` ändern (exakte ID aus OpenRouter, z. B. `meta/muse-spark-1.3-contributor`).
 3. **Freischalten:** Im Dashboard pro Website-Karte den **KI-Chat**-Schalter umlegen (nur Admins).
 
-Sicherheitsregeln der KI (in `src/lib/ai.ts`): Nur Ordner `src/content` (Inhalte),
-`src/components`, `src/pages`, `src/layouts`, `src/styles` (Design). Tabu: Paket- und
-Config-Dateien, Schlüssel, Passwörter. Die CMS-Vorschau-Brücke darf nie entfernt werden.
-Jede Veröffentlichung sichert Inhalte UND Code – der Verlauf stellt alles wieder her.
+Sicherheitsregeln der KI (in `src/lib/ai.ts`): Die KI darf im gesamten Website-Repo
+arbeiten. Tabu bleiben nur `.env`-Dateien, Schlüssel/Passwörter und das Entfernen der
+CMS-Vorschau-Brücke. Jede Veröffentlichung sichert Inhalte UND Code – der Verlauf stellt alles wieder her.
 
 ## Live-Vorschau auf der Astro-Website
 

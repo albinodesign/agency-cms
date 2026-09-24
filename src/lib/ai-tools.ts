@@ -433,7 +433,7 @@ export function buildAiTools(deps: AiToolsDeps) {
       }),
       execute: async ({ datei, inhalt }) => {
         if (!isAllowedCodePath(datei)) {
-          return { fehler: `Die Datei "${datei}" darfst du nicht ändern (Tabu-Bereich: Einstellungen, Pakete, Feldliste).` };
+          return { fehler: `Die Datei "${datei}" darfst du nicht ändern (.env-Dateien mit Geheimnissen sind tabu).` };
         }
         if (inhalt.length > AI_MAX_FILE_CHARS) {
           return { fehler: "Die Datei ist zu groß. Bitte in kleinere Schritte aufteilen." };

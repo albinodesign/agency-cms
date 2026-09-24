@@ -33,25 +33,8 @@ export function getAiModel() {
 
 export const MANIFEST_PATH = "src/content/cms.manifest.json";
 
-const BLOCKED_EXACT = new Set([
-  "package.json",
-  "package-lock.json",
-  "astro.config.mjs",
-  "astro.config.js",
-  "astro.config.ts",
-  "vercel.json",
-  "src/content.config.ts",
-  "src/content/config.ts",
-  "src/env.d.ts",
-  "tsconfig.json",
-]);
-
-const CODE_DIRS = [
-  "src/components/",
-  "src/pages/",
-  "src/layouts/",
-  "src/styles/",
-];
+/** Einzige harte Dateisperre für Code-Werkzeuge: .env-Dateien (Geheimnisse gehören nie ins Repo). */
+const ENV_FILE = /(^|\/)\.env(\.|$)/;
 
 export function isAllowedContentPath(filePath: string): boolean {
   if (filePath.includes("..")) return false;
@@ -60,12 +43,15 @@ export function isAllowedContentPath(filePath: string): boolean {
   return /^src\/content\/blog\/[a-z0-9-]+\.md$/.test(filePath);
 }
 
+/**
+ * Code-Dateien: Die KI darf im Website-Repo frei arbeiten (alle Pfade außer
+ * .env-Dateien). Schutz bleibt nur gegen Pfad-Tricks (".."). Geheimnisse und
+ * CMS-Brücke werden zusätzlich je Inhalt geprüft (findsSecret, breaksBridge).
+ */
 export function isAllowedCodePath(filePath: string): boolean {
   if (filePath.includes("..")) return false;
-  if (BLOCKED_EXACT.has(filePath)) return false;
-  if (/(^|\/)\.env(\.|$)/.test(filePath)) return false;
-  if (filePath === MANIFEST_PATH) return false;
-  return CODE_DIRS.some((dir) => filePath.startsWith(dir));
+  if (ENV_FILE.test(filePath)) return false;
+  return true;
 }
 
 export function findsSecret(text: string): boolean {
@@ -137,16 +123,16 @@ DEINE DREI GOLDENEN VERHALTENSREGELN (KIMI-CODE-PRINZIP):
 
 ABSCHLUSS-PFLICHT: Nachdem du deine Änderungen mit schreibeCode oder schreibeInhalt gespeichert hast, DARFST DU KEIN WEITERES WERKZEUG AUFRUFEN. Dein allerletzter Schritt MUSS zwingend eine ausführliche, sympathische Textnachricht an den Kunden sein, in der du dein Werk erklärst, 1–2 Design-Tipps gibst und mit einer Frage endest.
 
-2. TOKEN-DIÄT & GEZIELTES VORGEHEN:
+2. FREIES & GRÜNDLICHES VORGEHEN:
    - Die Startseite liegt IMMER in src/pages/index.astro und src/content/pages/home.json.
-   - Lies NIEMALS mehr als 2 Dateien auf Verdacht.
+   - Lies so viele Dateien, wie du für die Aufgabe brauchst – es gibt kein Limit.
    - Nutze zuerst das Werkzeug "projektUebersicht", um zu sehen, welche Astro-Komponenten und Seiten existieren.
-   - Lies nur die exakt benötigten Dateien.
+   - Du darfst im gesamten Website-Repo arbeiten: Komponenten, Seiten, Layouts, Stile, Konfiguration und Inhalte.
 
 3. ARCHITEKTUR-SICHERHEIT:
    - Du speicherst ALLES nur als Entwurf (Werkzeuge schreibeInhalt oder schreibeCode). Nichts geht sofort live, der Kunde prüft und veröffentlicht selbst per Button.
    - Entferne NIEMALS die CMS-Brücke (data-cms-field, CMS_FIELD_UPDATE, CMS_FIELD_SELECT).
-   - Keine sensiblen Schlüssel oder Passwörter in Code schreiben.
+   - Keine sensiblen Schlüssel oder Passwörter in Code schreiben, keine .env-Dateien anfassen.
    - Wenn du neuen Code baust, nutze semantisches HTML und Tailwind CSS 4.
 
 BEKANNTE FORMULAR-FELDER:
