@@ -202,6 +202,10 @@ export async function POST(request: Request) {
   });
 
   // Werkzeuge aus dem testbaren Modul (dieselben Regeln wie im Publish).
+  // Mitgeschrieben wird, welche Entwürfe diese Antwort erzeugt – für den
+  // Rückgängig-Button (kein Schema-Umbau: landet im Nachrichten-JSON).
+  const touchedDrafts: string[] = [];
+  const touchedCodeDrafts: string[] = [];
   const tools = buildAiTools({
     site: { id: siteId, repo_owner: site.repo_owner, repo_name: site.repo_name },
     serverFields,
@@ -210,12 +214,14 @@ export async function POST(request: Request) {
         const { error } = await supabase
           .from("drafts")
           .upsert({ site_id: sid, field_id: fieldId, value }, { onConflict: "site_id,field_id" });
+        if (!error && !touchedDrafts.includes(fieldId)) touchedDrafts.push(fieldId);
         return { error: error ? { message: error.message } : null };
       },
       storeCodeDraft: async (sid, filePath, content) => {
         const { error } = await supabase
           .from("code_drafts")
           .upsert({ site_id: sid, file_path: filePath, content }, { onConflict: "site_id,file_path" });
+        if (!error && !touchedCodeDrafts.includes(filePath)) touchedCodeDrafts.push(filePath);
         return { error: error ? { message: error.message } : null };
       },
       listDrafts: async (sid) => {
@@ -274,7 +280,7 @@ export async function POST(request: Request) {
           await supabase.from("ai_messages").insert({
             conversation_id: activeConvId,
             role: "assistant",
-            content: { text },
+            content: { text, entwuerfe: touchedDrafts, codeEntwuerfe: touchedCodeDrafts },
             prompt_tokens: totalUsage?.inputTokens ?? 0,
             completion_tokens: totalUsage?.outputTokens ?? 0,
           });

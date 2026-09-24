@@ -41,18 +41,39 @@ export async function GET(request: Request) {
 
   const { data: rows } = await supabase
     .from("ai_messages")
-    .select("role,content,created_at")
+    .select("id,role,content,created_at")
     .eq("conversation_id", (conv as { id: string }).id)
     .order("created_at", { ascending: true })
     .limit(40);
 
-  const messages = ((rows ?? []) as Array<{ role: string; content: { text?: string; dateien?: Array<{ name?: string; url?: string; mediaType?: string }> } | null }>)
+  const messages = (
+    (rows ?? []) as Array<{
+      id: string;
+      role: string;
+      content: {
+        text?: string;
+        dateien?: Array<{ name?: string; url?: string; mediaType?: string }>;
+        entwuerfe?: unknown;
+        codeEntwuerfe?: unknown;
+      } | null;
+    }>
+  )
     .filter((r) => r.role === "user" || r.role === "assistant")
-    .map((r) => ({
-      role: r.role,
-      text: typeof r.content?.text === "string" ? r.content.text : "",
-      dateien: Array.isArray(r.content?.dateien) ? r.content.dateien : [],
-    }))
+    .map((r) => {
+      const entwuerfe = Array.isArray(r.content?.entwuerfe)
+        ? r.content.entwuerfe.filter((v) => typeof v === "string")
+        : [];
+      const codeEntwuerfe = Array.isArray(r.content?.codeEntwuerfe)
+        ? r.content.codeEntwuerfe.filter((v) => typeof v === "string")
+        : [];
+      return {
+        id: r.id,
+        role: r.role,
+        text: typeof r.content?.text === "string" ? r.content.text : "",
+        dateien: Array.isArray(r.content?.dateien) ? r.content.dateien : [],
+        entwuerfeAnzahl: entwuerfe.length + codeEntwuerfe.length,
+      };
+    })
     .filter((m) => m.text !== "" || m.dateien.length > 0);
 
   return NextResponse.json({ conversation: conv, messages });
