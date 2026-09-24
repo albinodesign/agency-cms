@@ -148,7 +148,7 @@ Setup in 3 Schritten:
    ausführen (Schalter-Spalte, Gespräche, Code-Entwürfe, Kosten-Zähler inkl. Regeln).
 2. **Schlüssel:** `OPENROUTER_API_KEY` vom OpenRouter-Dashboard (https://openrouter.ai/keys)
    in `.env.local` (lokal) und in Vercel → Settings → Environment Variables (live) eintragen.
-   Modell wechseln = nur die Zeile `AI_MODEL` ändern (exakte ID aus OpenRouter, z. B. `meta/muse-spark-1.3`).
+   Modell wechseln = nur die Zeile `AI_MODEL` ändern (exakte ID aus OpenRouter, z. B. `meta/muse-spark-1.3-contributor`).
 3. **Freischalten:** Im Dashboard pro Website-Karte den **KI-Chat**-Schalter umlegen (nur Admins).
 
 Sicherheitsregeln der KI (in `src/lib/ai.ts`): Nur Ordner `src/content` (Inhalte),

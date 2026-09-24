@@ -64,7 +64,9 @@ src/
 │       ├── publish/         # Entwürfe -> GitHub-Commits + publish_history
 │       ├── rollback/        # Wiederherstellung aus publish_history
 │       ├── blog/            # Blog-Artikel CRUD (Markdown im Repo)
-│       └── admin/create-site/  # Site + Kunden-Nutzer anlegen (nur Admins, Service Role)
+│       ├── admin/create-site/  # Site + Kunden-Nutzer anlegen (nur Admins, Service Role)
+│       ├── admin/delete-site/  # Site + CMS-Daten löschen (nur Admins, Rest per Cascade; Repo/Login bleiben)
+│       └── admin/toggle-ai/    # KI-Chat pro Site an/aus (nur Admins)
 ├── components/
 │   ├── editor/              # EditorClient, ImageField, HistoryDrawer, BlogPanel, BlogEditorModal
 │   ├── DashboardClient.tsx, CreateSiteModal.tsx, LogoutButton.tsx

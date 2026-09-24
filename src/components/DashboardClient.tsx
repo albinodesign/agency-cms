@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { LogoutButton } from "@/components/LogoutButton";
 import { CreateSiteModal } from "@/components/CreateSiteModal";
-import { ArrowRight, Globe, Plus, Sparkles } from "lucide-react";
+import { ArrowRight, Globe, Plus, Sparkles, Trash2 } from "lucide-react";
 import type { Site } from "@/types/cms";
 
 interface DashboardClientProps {
@@ -23,6 +23,7 @@ export function DashboardClient({
   const [sites, setSites] = useState<Site[]>(initialSites);
   const [modalOpen, setModalOpen] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   // Monatsname großgeschrieben für die Verbrauchs-Anzeige (z. B. "März")
   const currentMonthName = (() => {
     const name = new Date().toLocaleDateString("de-DE", { month: "long" });
@@ -49,6 +50,32 @@ export function DashboardClient({
       alert("Server nicht erreichbar. Bitte später erneut versuchen.");
     } finally {
       setTogglingId(null);
+    }
+  }
+
+  /** Website samt aller CMS-Daten löschen (nur Admins, mit Bestätigung). */
+  async function deleteSite(site: Site) {
+    const confirmed = window.confirm(
+      `"${site.name}" wirklich löschen? Alle Entwürfe, der Verlauf und die Zuordnungen gehen verloren. Das GitHub-Repo bleibt bestehen.`
+    );
+    if (!confirmed) return;
+    setDeletingId(site.id);
+    try {
+      const res = await fetch("/api/admin/delete-site", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ siteId: site.id }),
+      });
+      const body = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        alert(body.error ?? "Website konnte nicht gelöscht werden.");
+        return;
+      }
+      setSites((prev) => prev.filter((s) => s.id !== site.id));
+    } catch {
+      alert("Server nicht erreichbar. Bitte später erneut versuchen.");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -160,6 +187,17 @@ export function DashboardClient({
                 Website bearbeiten
                 <ArrowRight className="h-4 w-4" />
               </Link>
+              {isAdmin && (
+                <button
+                  onClick={() => void deleteSite(site)}
+                  disabled={deletingId === site.id}
+                  title={`"${site.name}" samt aller CMS-Daten löschen`}
+                  className="mt-2 inline-flex items-center justify-center gap-1.5 rounded-lg border border-red-200 bg-white px-4 py-2 text-sm font-medium text-red-700 transition hover:bg-red-50 disabled:opacity-60"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  {deletingId === site.id ? "Wird gelöscht …" : "Website löschen"}
+                </button>
+              )}
             </div>
           ))}
         </div>

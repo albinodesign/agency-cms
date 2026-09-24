@@ -1,14 +1,14 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { normalizeManifest } from "@/lib/github";
 
-export const DEFAULT_AI_MODEL = "meta/muse-spark-1.3";
+export const DEFAULT_AI_MODEL = "meta/muse-spark-1.3-contributor";
 export const AI_MAX_STEPS = 25;
 /** Maximale Dateigröße für Lese-Operationen (Schutz vor Token-Explosion) */
 export const AI_MAX_FILE_CHARS = 50_000;
 
-/** OpenRouter-Preise für Meta Muse Spark 1.3 umgerechnet in Euro */
-export const AI_INPUT_COST_PER_MILLION_EUR = 1.15;
-export const AI_OUTPUT_COST_PER_MILLION_EUR = 3.90;
+/** OpenRouter-Preise für Meta Muse Spark 1.3 Contributor umgerechnet in Euro (0,10 $/0,20 $ pro Mio. Token). */
+export const AI_INPUT_COST_PER_MILLION_EUR = 0.09;
+export const AI_OUTPUT_COST_PER_MILLION_EUR = 0.18;
 
 export function calculateCostEuro(promptTokens: number, completionTokens: number): number {
   const inputCost = (promptTokens / 1_000_000) * AI_INPUT_COST_PER_MILLION_EUR;
