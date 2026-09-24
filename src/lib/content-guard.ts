@@ -17,6 +17,7 @@
 import { getByPath, getBySegments, parsePathSafe } from "./json-path";
 import type { CmsManifest, FieldType, ManifestField } from "../types/cms";
 import { FREE_DRAFT_PREFIX } from "../types/cms";
+import { convertStoredValue, validateFinalJsonValue } from "./validate";
 
 /** Die Feldliste selbst ist niemals ein normales Feldziel. */
 export const MANIFEST_PATH = "src/content/cms.manifest.json";
@@ -299,10 +300,15 @@ export function isPlainObject(node: unknown): node is Record<string, unknown> {
  *   `banner`-Behälter anlegen, Werte werden typgeprüft (an/aus, Stil-Enum,
  *   Textlänge). Das CMS besitzt dieses Modell (Banner-Schalter), die Website
  *   rendert `site.banner`.
- * - Listen-Ergänzung: Anhängen exakt am Ende einer bestehenden Liste, wahlweise
- *   als einzelner Wert oder als neues Element mit genau einem Feld
+ * - Listen-Ergänzung: Anhängen exakt am Ende einer bestehenden Liste
+ *   (gegen den LIVE-Stand geprüft), wahlweise als einzelner Wert oder als
+ *   neues Element mit genau einem Feld
  *   (z. B. `items[3].frage` bei Länge 3 für eine neue FAQ-Frage).
  * Alles andere Neue (beliebige Schlüssel, tiefere Strukturen) wird abgelehnt.
+ * Ob eine Listen-Ergänzung veröffentlichbar ist, entscheidet NICHT diese
+ * Einordnung, sondern die gemeinsame Strukturprüfung (validateListStructures)
+ * anhand ausdrücklicher Listenmodelle – Nachbareinträge allein begründen
+ * keine Pflichtfelder (siehe DYNAMIC_LIST_MODELS).
  * Aufrufstellen: Publish-Route (vorab + Endkontrolle) und KI-Werkzeug
  * `schreibeInhalt` (frühe Rückmeldung).
  */
@@ -310,7 +316,8 @@ export function classifyFreeTarget(
   file: string,
   path: string,
   fileJson: Record<string, unknown> | undefined,
-  value: string
+  value: string,
+  candidateJson?: Record<string, unknown>
 ): FreeClassify {
   const parsed = parsePathSafe(path);
   if (!parsed.ok) return { ok: false, error: parsed.error };
@@ -331,7 +338,12 @@ export function classifyFreeTarget(
     if (bannerProblem) return { ok: false, error: bannerProblem };
   }
 
-  if (fileJson && getBySegments(fileJson, segments) !== undefined) {
+  // Bestand zählt inklusive bereits gespeicherter Entwürfe (falls übergeben):
+  // So bleibt ein erlaubter begonnener Eintrag vervollständigbar und eine
+  // Korrektur desselben Pfads ein normales Schreiben. Die Ergänzungsprüfung
+  // darunter läuft bewusst gegen den Live-Stand (fileJson).
+  const base = candidateJson ?? fileJson;
+  if (base && getBySegments(base, segments) !== undefined) {
     return { ok: true, creation: null, canonical };
   }
 
@@ -345,7 +357,9 @@ export function classifyFreeTarget(
     return { ok: true, creation: { kind: "banner", file, canonical }, canonical };
   }
 
-  // Ausnahme 2: Listen-Ergänzung exakt am Ende einer bestehenden Liste.
+  // Ausnahme 2: Listen-Ergänzung exakt am Ende einer bestehenden Liste
+  // (Live-Stand in fileJson – candidateJson zählt hier nicht, damit eine
+  // Fortsetzung wie items[2].antwort nach items[2].frage erkannt wird).
   if (fileJson) {
     let node: unknown = fileJson;
     for (let k = 0; k < segments.length; k += 1) {
@@ -510,9 +524,13 @@ export function resolveTargetType(
 
 /**
  * Erforderliche Schlüssel eines Listen-Elements: Schnittmenge der Schlüssel
- * aller vorhandenen Objekt-Elemente. Neue Elemente müssen diese enthalten,
- * damit sie zum Website-Modell passen (z. B. quote+author+location+rating).
- * Leere oder uneinheitliche Listen liefern [] (Modell unbekannt).
+ * aller vorhandenen Objekt-Elemente.
+ *
+ * ACHTUNG (1d): Diese Ableitung aus Nachbareinträgen ist KEINE verlässliche
+ * Quelle für Pflichtfelder, Typen oder Listenlängen und begründet keine
+ * Veröffentlichungsentscheidung. Verbindlich sind nur ausdrückliche
+ * Listenmodelle (DYNAMIC_LIST_MODELS) plus die strikte Endprüfung. Die
+ * Funktion bleibt nur für Diagnosezwecke und bestehende Tests erhalten.
  */
 export function inferRequiredKeys(list: unknown): string[] {
   if (!Array.isArray(list)) return [];
@@ -521,4 +539,446 @@ export function inferRequiredKeys(list: unknown): string[] {
   const [first, ...rest] = objects;
   const keys = Object.keys(first).filter((k) => !["__proto__", "constructor", "prototype"].includes(k));
   return keys.filter((k) => rest.every((o) => Object.prototype.hasOwnProperty.call(o, k)));
+}
+
+/* =====================================================================
+ * Gemeinsame 1d-Logik: Zielauflösung, Typumwandlung, Listenmodelle,
+ * Banner-Endprüfung und Kandidaten-Strukturprüfung.
+ *
+ * Diese Bausteine werden vom Veröffentlichen UND vom KI-Chat verwendet –
+ * für dasselbe Ziel gelten dieselben Regeln, egal ob es über Manifest-ID,
+ * freien json:-Alias, vollständigen Datei-Entwurf oder eine Kombination
+ * bearbeitet wird. Kundendaten (Live-Inhalte, Entwürfe) schwächen ihre
+ * eigenen Prüfregeln nicht ab: Was kein ausdrückliches Modell hat, wird
+ * als Strukturänderung ehrlich abgelehnt statt aus Nachbarn geraten.
+ * ===================================================================== */
+
+/** Typ-, Längen- und Label-Eintrag je kanonischem Ziel (Manifest oder Modell). */
+export interface TypeEntry {
+  type: FieldType;
+  maxLength?: number;
+  label: string;
+}
+
+/** Aufgelöster Bearbeitungstyp inkl. Herkunft (für einheitliche Umwandlung). */
+export interface ResolvedEditType extends TypeEntry {
+  via: "manifest" | "banner" | "modell" | "frei";
+}
+
+/**
+ * Ausdrücklich modellierte dynamische Liste (vertrauenswürdige Agentur-Regel,
+ * kein Ableiten aus Kundendaten): Datei plus kanonischer Listenpfad plus
+ * erforderliche Schlüssel mit Typen. Nur solche Listen dürfen per Entwurf am
+ * Ende wachsen; neue Elemente brauchen alle Modellschlüssel in typgerechter
+ * Form und keine fremden Schlüssel. Alle anderen Listen sind fest:
+ * Längenänderungen werden abgelehnt, bis die Agentur hier einen passenden
+ * Modellfall hinterlegt. Keine globale Eintrags-Regel, kein Feldanzahl-Limit.
+ */
+export interface DynamicListModel {
+  file: string;
+  /** Kanonischer Listenpfad, z. B. "items" oder "testimonials.items". */
+  path: string;
+  required: Record<string, FieldType>;
+}
+
+/**
+ * Derzeit einzig ausdrücklich modellierte dynamische Liste: die FAQ-Liste
+ * in faq.json (Elemente mit frage + antwort als Text). Feste Sektionen wie
+ * testimonials.items haben bewusst KEINEN Eintrag und wachsen daher nicht.
+ * Erweiterung nur hier im Code (Agentur), niemals aus Kundendaten.
+ */
+export const DYNAMIC_LIST_MODELS: DynamicListModel[] = [
+  {
+    file: "src/content/pages/faq.json",
+    path: "items",
+    required: { frage: "text", antwort: "text" },
+  },
+];
+
+/** Findet das ausdrückliche Wachstumsmodell einer Liste (null = feste Liste). */
+export function findListModel(file: string, listCanonical: string): DynamicListModel | null {
+  return (
+    DYNAMIC_LIST_MODELS.find((m) => m.file === file && m.path === listCanonical) ?? null
+  );
+}
+
+/** Einheitliche Schreibweise für Segmentlisten (wie json-path-kanonisch). */
+function segmentsToCanonical(segments: Array<string | number>): string {
+  let out = "";
+  segments.forEach((segment, index) => {
+    if (typeof segment === "number") {
+      out += `[${segment}]`;
+    } else {
+      out += (index === 0 ? "" : ".") + segment;
+    }
+  });
+  return out;
+}
+
+/** Listenzusammenhang einer Ergänzung (Index auf Live-Länge). */
+export interface AppendContext {
+  listSegments: Array<string | number>;
+  listCanonical: string;
+  liveLength: number;
+  index: number;
+  /** Segmente nach dem Listen-Index (leer = reiner Index-Anhang). */
+  rest: Array<string | number>;
+}
+
+/**
+ * Erkennt, ob Segmente exakt ans Ende einer Live-Liste anhängen
+ * (Index == Live-Länge). Null, wenn kein Anhang am Ende vorliegt.
+ */
+export function appendContextFor(
+  segments: Array<string | number>,
+  liveJson: Record<string, unknown> | undefined
+): AppendContext | null {
+  if (!liveJson) return null;
+  for (let k = 0; k < segments.length; k += 1) {
+    if (typeof segments[k] !== "number") continue;
+    const arr = getBySegments(liveJson, segments.slice(0, k));
+    const index = segments[k] as number;
+    if (Array.isArray(arr) && arr.length === index) {
+      const listSegments = segments.slice(0, k);
+      return {
+        listSegments,
+        listCanonical: segmentsToCanonical(listSegments),
+        liveLength: arr.length,
+        index,
+        rest: segments.slice(k + 1),
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Modelltyp eines neuen Listen-Blatts (z. B. antwort als Text): Nur für exakt
+ * einen neuen Blatt-Schlüssel am Listenende mit ausdrücklichem Modell.
+ * Sonst null (kein Raten aus Geschwistertypen).
+ */
+export function modelTypeForAppend(
+  file: string,
+  segments: Array<string | number>,
+  liveJson: Record<string, unknown> | undefined
+): FieldType | null {
+  const ctx = appendContextFor(segments, liveJson);
+  if (!ctx || ctx.rest.length !== 1 || typeof ctx.rest[0] !== "string") return null;
+  const model = findListModel(file, ctx.listCanonical);
+  if (!model) return null;
+  return model.required[ctx.rest[0]] ?? null;
+}
+
+/**
+ * Löst den Bearbeitungstyp eines Ziels einheitlich auf – unabhängig vom
+ * Zugriffsweg: deklariertes Manifestfeld, Banner-Regel, ausdrückliches
+ * Listenmodell oder freier Text. Wird vom Veröffentlichen (Umwandlung +
+ * Prüfung) und vom Chat (Kandidatenbildung + Hinweise) gemeinsam benutzt.
+ */
+export function resolveEditType(
+  file: string,
+  segments: Array<string | number>,
+  canonical: string | null,
+  typeMap: Map<string, TypeEntry>,
+  liveJson: Record<string, unknown> | undefined
+): ResolvedEditType {
+  if (canonical) {
+    const declared = typeMap.get(canonical);
+    if (declared) return { ...declared, via: "manifest" };
+  }
+  if (
+    file === SITE_JSON &&
+    segments.length === 2 &&
+    segments[0] === "banner" &&
+    typeof segments[1] === "string" &&
+    (segments[1] === "enabled" || segments[1] === "variant" || segments[1] === "text")
+  ) {
+    const key = segments[1];
+    return {
+      type: bannerTargetType(key),
+      maxLength: bannerMaxLength(key),
+      label: `Banner-${key}`,
+      via: "banner",
+    };
+  }
+  const modelType = modelTypeForAppend(file, segments, liveJson);
+  if (modelType) {
+    return { type: modelType, label: String(segments[segments.length - 1]), via: "modell" };
+  }
+  return { type: "text", label: String(segments[segments.length - 1]), via: "frei" };
+}
+
+/**
+ * Wandelt einen rohen Entwurfs-String zieltypabhängig um (gemeinsam für
+ * Publish-Kandidat und Chat-Kandidat): Nur Boolean-Felder werden zu echten
+ * Booleans, nur Zahl-Felder zu echten Zahlen. Texte wie "true" in
+ * Textfeldern bleiben Text.
+ */
+export function convertEditValue(
+  file: string,
+  editPath: string,
+  rawValue: string,
+  typeMap: Map<string, TypeEntry>,
+  liveJson: Record<string, unknown> | undefined
+): unknown {
+  const parsed = parsePathSafe(editPath);
+  if (!parsed.ok) return rawValue;
+  const resolved = resolveEditType(
+    file,
+    parsed.segments,
+    `${file}#${parsed.canonical}`,
+    typeMap,
+    liveJson
+  );
+  return convertStoredValue(resolved.type, rawValue);
+}
+
+/** Fehlermeldung für Wachstum einer festen Liste (kein Modell). */
+export function fixedListGrowError(file: string, listPath: string): string {
+  return `Die Liste "${listPath}" in "${file}" ist eine feste Liste und darf nicht wachsen (kein dynamisches Website-Modell). Bitte über die Agentur anlegen lassen.`;
+}
+
+/** Fehlermeldung für Kürzen einer festen Liste (kein Modell). */
+export function fixedListShrinkError(file: string, listPath: string): string {
+  return `Die Liste "${listPath}" in "${file}" ist eine feste Liste und darf nicht gekürzt werden (kein dynamisches Website-Modell). Bitte über die Agentur ändern lassen.`;
+}
+
+/**
+ * Prüft den Banner-Endstand – gilt IMMER, wenn ein Banner-Objekt vorhanden
+ * ist, auch bei ausgeschaltetem Banner: Vorhandene Werte müssen gültig sein
+ * (Stil-Enum, Textlänge). Eingeschaltet braucht zusätzlich Stil + Text.
+ * Liefert deutsche Meldungen (leer = gültig). Gemeinsam für Publish und Chat.
+ */
+export function getBannerProblems(banner: unknown): string[] {
+  const problems: string[] = [];
+  if (!isPlainObject(banner)) {
+    return [`Der Banner-Bereich in ${SITE_JSON} ist beschädigt (muss ein Objekt sein).`];
+  }
+  const record = banner as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key !== "enabled" && key !== "variant" && key !== "text") {
+      problems.push(`Unbekanntes Banner-Feld "${key}" (erlaubt: enabled, variant, text).`);
+    }
+  }
+  const enabled = record.enabled;
+  const on = enabled === true;
+  if (enabled !== true && enabled !== false) {
+    problems.push(`Banner-Schalter muss an oder aus sein (erwartet: true oder false).`);
+  }
+  const variant = record.variant;
+  const variantOk =
+    typeof variant === "string" &&
+    (BANNER_VARIANTS as readonly string[]).includes(variant.trim());
+  if (on && !variantOk) {
+    problems.push(
+      `Banner ist eingeschaltet, aber der Stil fehlt oder ist ungültig (erlaubt: ${BANNER_VARIANTS.join(", ")}).`
+    );
+  } else if (variant !== undefined && !variantOk) {
+    const shown = typeof variant === "string" ? variant.slice(0, 40) : "unbekannt";
+    problems.push(
+      `Banner-Stil "${shown}" ist ungültig (erlaubt: ${BANNER_VARIANTS.join(", ")}). Auch bei ausgeschaltetem Banner müssen vorhandene Werte gültig sein.`
+    );
+  }
+  const text = record.text;
+  if (on && (typeof text !== "string" || text.trim() === "")) {
+    problems.push(`Banner ist eingeschaltet, aber der Text fehlt.`);
+  } else if (typeof text === "string" && text.length > BANNER_TEXT_MAX) {
+    problems.push(
+      `Banner-Text ist zu lang (${text.length} von max. ${BANNER_TEXT_MAX} Zeichen). Auch bei ausgeschaltetem Banner müssen vorhandene Werte gültig sein.`
+    );
+  } else if (text !== undefined && typeof text !== "string") {
+    problems.push(`Banner-Text muss ein Text sein.`);
+  }
+  return problems;
+}
+
+/** Fehlende Modellschlüssel eines Elements (leere/fehlende zählen als fehlend). */
+function listModelMissingKeys(
+  model: DynamicListModel,
+  element: Record<string, unknown>
+): string[] {
+  return Object.keys(model.required).filter((key) => {
+    const v = element[key];
+    return v === undefined || v === null || (typeof v === "string" && v.trim() === "");
+  });
+}
+
+/**
+ * Prüft ein neu angehängtes Listen-Element gegen sein ausdrückliches Modell:
+ * Objektform, Vollständigkeit, keine fremden Schlüssel, typgerechte Werte
+ * (strikte Endtypen). Deutsche Meldungen, leer = ok.
+ */
+function validateNewListElement(
+  file: string,
+  listPath: string,
+  model: DynamicListModel,
+  element: unknown
+): string[] {
+  const errors: string[] = [];
+  const wanted = Object.keys(model.required);
+  if (!isPlainObject(element)) {
+    errors.push(
+      `Ergänzung in "${file}" (${listPath}): Das neue Element muss ein Objekt mit ${wanted.join(", ")} sein.`
+    );
+    return errors;
+  }
+  const record = element as Record<string, unknown>;
+  const missing = listModelMissingKeys(model, record);
+  if (missing.length > 0) {
+    errors.push(
+      `Ergänzung in "${file}" (${listPath}): unvollständig – es fehlen noch: ${missing.join(", ")}. Alle Angaben im selben Satz liefern, dann geht es.`
+    );
+  }
+  const extras = Object.keys(record).filter(
+    (k) => !Object.prototype.hasOwnProperty.call(model.required, k)
+  );
+  if (extras.length > 0) {
+    errors.push(
+      `Ergänzung in "${file}" (${listPath}): unerlaubte Felder: ${extras.join(", ")} – das Listen-Modell kennt nur: ${wanted.join(", ")}.`
+    );
+  }
+  for (const key of wanted) {
+    const v = record[key];
+    if (v === undefined || v === null || (typeof v === "string" && v.trim() === "")) continue;
+    const problem = validateFinalJsonValue(model.required[key], v);
+    if (problem) errors.push(`Ergänzung in "${file}" (${listPath}): Feld "${key}": ${problem}`);
+  }
+  return errors;
+}
+
+interface ArraySpot {
+  segments: Array<string | number>;
+  canonical: string;
+}
+
+/** Sammelt alle Listenpfade eines JSON-Baums (Tiefen-begrenzt, ohne Tricks). */
+function collectArrayPaths(
+  node: unknown,
+  prefix: Array<string | number>,
+  out: Array<ArraySpot>,
+  depth: number
+): void {
+  if (depth > 20 || typeof node !== "object" || node === null) return;
+  if (Array.isArray(node)) {
+    out.push({ segments: [...prefix], canonical: segmentsToCanonical(prefix) });
+    node.forEach((el, i) => collectArrayPaths(el, [...prefix, i], out, depth + 1));
+    return;
+  }
+  for (const key of Object.keys(node)) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+    collectArrayPaths((node as Record<string, unknown>)[key], [...prefix, key], out, depth + 1);
+  }
+}
+
+function deepEqualJson(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * Gemeinsame Listen-Strukturprüfung über den GESAMTEN fertigen Kandidaten
+ * (Live gegen Kandidat, je Datei): Feste Listen dürfen weder wachsen noch
+ * schrumpfen; dynamische Listen (ausdrückliches Modell) nur rein am Ende mit
+ * vollständigen, typgerechten Elementen ohne fremde Schlüssel; neue Listen
+ * ohne Vorbild und entfernte Listen werden abgelehnt. Gilt für Feldentwürfe,
+ * freie Aliase UND vollständige Datei-Entwürfe gleichermaßen – kein
+ * Sonderweg. Deutsche Meldungen, leer = ok.
+ */
+export function validateListStructures(
+  liveFiles: Map<string, Record<string, unknown>>,
+  candidateFiles: Map<string, Record<string, unknown>>
+): string[] {
+  const errors: string[] = [];
+  for (const [file, live] of liveFiles) {
+    // Die Feldliste selbst ist kein Inhaltsziel: Ihre Änderung (neue
+    // Sektionen/Felder) wird über Manifest-Regeln geprüft, nicht als
+    // Listenwachstum.
+    if (file === MANIFEST_PATH) continue;
+    const cand = candidateFiles.get(file);
+    if (!cand) continue; // Datei entfällt: Manifestziele melden das bereits.
+    const liveArrays: Array<ArraySpot> = [];
+    collectArrayPaths(live, [], liveArrays, 0);
+    const candArrays: Array<ArraySpot> = [];
+    collectArrayPaths(cand, [], candArrays, 0);
+    const candByPath = new Map(candArrays.map((a) => [a.canonical, a] as const));
+    for (const spot of liveArrays) {
+      const label = spot.canonical === "" ? "Hauptliste" : spot.canonical;
+      const liveArr = getBySegments(live, spot.segments);
+      const hit = candByPath.get(spot.canonical);
+      const candArr = hit ? getBySegments(cand, hit.segments) : undefined;
+      if (candArr === undefined) {
+        errors.push(
+          `Die Liste "${label}" in "${file}" fehlt im neuen Stand – Listen dürfen nicht per Entwurf entfernt werden. Bitte über die Agentur ändern lassen.`
+        );
+        continue;
+      }
+      if (!Array.isArray(candArr)) {
+        errors.push(
+          `Die Liste "${label}" in "${file}" ist keine Liste mehr – die Listenform bitte über die Agentur ändern lassen.`
+        );
+        continue;
+      }
+      if (!Array.isArray(liveArr)) continue;
+      if (candArr.length === liveArr.length) continue; // Blattänderungen prüfen die Feldregeln.
+      const model = findListModel(file, spot.canonical);
+      if (candArr.length > liveArr.length) {
+        if (!model) {
+          errors.push(fixedListGrowError(file, label));
+          continue;
+        }
+        let prefixOk = true;
+        for (let i = 0; i < liveArr.length; i += 1) {
+          if (!deepEqualJson(liveArr[i], candArr[i])) {
+            prefixOk = false;
+            break;
+          }
+        }
+        if (!prefixOk) {
+          errors.push(
+            `Die Liste "${label}" in "${file}" darf nur am Ende ergänzt werden (bestehende Einträge unverändert lassen).`
+          );
+          continue;
+        }
+        for (let i = liveArr.length; i < candArr.length; i += 1) {
+          errors.push(...validateNewListElement(file, label, model, candArr[i]));
+        }
+        continue;
+      }
+      if (!model) {
+        errors.push(fixedListShrinkError(file, label));
+        continue;
+      }
+      // Dynamische Liste kürzen: zulässig (kein Mindestmaß modelliert).
+    }
+    const livePaths = new Set(liveArrays.map((a) => a.canonical));
+    for (const spot of candArrays) {
+      if (!livePaths.has(spot.canonical)) {
+        const label = spot.canonical === "" ? "Hauptliste" : spot.canonical;
+        errors.push(
+          `Neue Liste "${label}" in "${file}" ohne Website-Modell – bitte über die Agentur anlegen lassen.`
+        );
+      }
+    }
+  }
+  return errors;
+}
+
+/**
+ * Fehlende Modellschlüssel einer begonnenen Listen-Ergänzung für ehrliche
+ * Chat-Hinweise: Prüft das EINTRAGSOBJEKT im Kandidaten (nicht den
+ * Blattwert) gegen das ausdrückliche Modell und meldet vorhandene Angaben
+ * niemals als fehlend. Ohne Modell oder ohne Anhang: [] (kein Raten).
+ */
+export function missingAppendKeys(
+  file: string,
+  segments: Array<string | number>,
+  liveJson: Record<string, unknown> | undefined,
+  candidate: Record<string, unknown>
+): string[] {
+  const ctx = appendContextFor(segments, liveJson);
+  if (!ctx || ctx.rest.length > 1) return [];
+  const model = findListModel(file, ctx.listCanonical);
+  if (!model) return [];
+  const element = getBySegments(candidate, [...ctx.listSegments, ctx.index]);
+  if (!isPlainObject(element)) return Object.keys(model.required);
+  return listModelMissingKeys(model, element as Record<string, unknown>);
 }

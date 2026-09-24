@@ -18,20 +18,26 @@ import {
   validateManifestText,
 } from "./ai";
 import type { AiFieldContext } from "./ai";
-import { getByPath, getBySegments, parsePathSafe, setByPath } from "./json-path";
+import { getByPath, parsePathSafe, setByPath } from "./json-path";
 import {
   FREE_VALUE_MAX,
   SITE_JSON,
   SUPPORTED_FIELD_TYPES,
+  appendContextFor,
   canonicalTarget,
   classifyFreeTarget,
-  inferRequiredKeys,
+  convertEditValue,
+  findListModel,
+  fixedListGrowError,
+  getBannerProblems,
   isAllowedFieldJsonFile,
   isPlainObject,
+  missingAppendKeys,
   parseFreeDraftIdSafe,
-  resolveTargetType,
+  validateBannerValue,
   validateJsonPath,
 } from "./content-guard";
+import type { TypeEntry } from "./content-guard";
 import { validateDraftValue, validateJsonValue } from "./validate";
 import type { FieldType } from "../types/cms";
 import { FREE_DRAFT_PREFIX } from "../types/cms";
@@ -90,51 +96,42 @@ function safeTypeOf(value: unknown): FieldType {
   return SUPPORTED_FIELD_TYPES.includes(value as FieldType) ? (value as FieldType) : "text";
 }
 
-/** Fehlende Pflichtschlüssel eines angehängten Elements (ehrlicher Hinweis). */
-function missingAppendKeys(
-  segments: Array<string | number>,
-  liveJson: Record<string, unknown> | undefined,
-  candidate: Record<string, unknown>
-): string[] {
-  for (let k = 0; k < segments.length; k += 1) {
-    if (typeof segments[k] !== "number") continue;
-    const arr = liveJson ? getBySegments(liveJson, segments.slice(0, k)) : undefined;
-    if (Array.isArray(arr) && arr.length === segments[k]) {
-      if (segments.length > k + 2) return [];
-      if (segments.length === k + 1) return [];
-      const required = inferRequiredKeys(arr);
-      if (required.length === 0) return [];
-      const element = getBySegments(candidate, segments.slice(0, k + 2));
-      return required.filter((key) => {
-        const v = isPlainObject(element) ? element[key] : undefined;
-        return v === undefined || v === null || (typeof v === "string" && v.trim() === "");
-      });
-    }
-  }
-  return [];
-}
-
-/** Fehlende Banner-Angaben im Kandidaten (ehrlicher Hinweis). */
+/** Fehlende Banner-Angaben im Kandidaten (ehrlicher Hinweis, gemeinsame Prüfung). */
 function missingBannerParts(candidate: Record<string, unknown> | undefined): string[] {
-  const missing: string[] = [];
   const banner =
     candidate && isPlainObject(candidate.banner)
       ? (candidate.banner as Record<string, unknown>)
       : undefined;
-  if (!banner || banner.enabled !== true) return missing;
-  if (typeof banner.variant !== "string" || banner.variant.trim() === "") {
-    missing.push("Stil (vacation, emergency oder info)");
+  if (!banner) return [];
+  // Gemeinsame Banner-Prüfung wie im Publish – auch String-"true" zählt als
+  // eingeschaltet, damit fehlender Stil/Text nie übersehen werden.
+  const problems = getBannerProblems(
+    banner.enabled === "true" || banner.enabled === "false"
+      ? { ...banner, enabled: banner.enabled === "true" }
+      : banner
+  );
+  const parts: string[] = [];
+  if (problems.some((p) => /Stil/.test(p))) parts.push("Stil (vacation, emergency oder info)");
+  if (problems.some((p) => /Text/.test(p))) parts.push("Text (max. 160 Zeichen)");
+  if (problems.some((p) => /Schalter/.test(p))) parts.push("Schalter (an/aus)");
+  for (const p of problems) {
+    if (!/Stil|Text|Schalter/.test(p)) parts.push(p);
   }
-  if (typeof banner.text !== "string" || banner.text.trim() === "") {
-    missing.push("Text");
-  }
-  return missing;
+  return parts;
 }
 
 export function buildAiTools(deps: AiToolsDeps) {
   const { site, serverFields, store, repo } = deps;
   const fieldMap = new Map(serverFields.map((f) => [f.id, f]));
   const byCanonical = manifestByCanonical(serverFields);
+  // Gemeinsame Zielauflösung wie im Publish: kanonisches Ziel -> Typ/Länge/Label.
+  const typeMap = new Map<string, TypeEntry>();
+  for (const f of serverFields) {
+    const c = canonicalTarget(f.file, f.path);
+    if (c && !typeMap.has(c)) {
+      typeMap.set(c, { type: safeTypeOf(f.type), maxLength: f.maxLength, label: f.label });
+    }
+  }
 
   /** Kandidat aus Live-Datei + bereits gespeicherten Entwürfen (best effort). */
   async function buildCandidate(
@@ -161,7 +158,9 @@ export function buildAiTools(deps: AiToolsDeps) {
         const known = fieldMap.get(d.field_id);
         if (known && known.file === datei) {
           try {
-            setByPath(candidate, known.path, d.value);
+            // Gemeinsame Typumwandlung wie im Publish (keine rohen Strings:
+            // "true" auf Boolean-Feldern wird echtes true).
+            setByPath(candidate, known.path, convertEditValue(datei, known.path, d.value, typeMap, live));
           } catch {
             // Alter Entwurf passt nicht mehr – ignorieren, Publish prüft streng.
           }
@@ -170,7 +169,7 @@ export function buildAiTools(deps: AiToolsDeps) {
         const free = parseFreeDraftIdSafe(d.field_id);
         if (free.ok && free.file === datei) {
           try {
-            setByPath(candidate, free.path, d.value);
+            setByPath(candidate, free.path, convertEditValue(datei, free.path, d.value, typeMap, live));
           } catch {
             // Wie oben: Publish entscheidet.
           }
@@ -180,6 +179,16 @@ export function buildAiTools(deps: AiToolsDeps) {
       // Entwürfe nicht ladbar – weiter mit Live-Stand (Publish prüft streng).
     }
     return { live, candidate };
+  }
+
+  /** Banner-Hinweis nach einer Speicherung (gemeinsame Prüfung wie im Publish). */
+  async function bannerHint(datei: string): Promise<string | null> {
+    if (datei !== SITE_JSON) return null;
+    const built = await buildCandidate(datei);
+    if ("fehler" in built) return null;
+    const parts = missingBannerParts(built.candidate);
+    if (parts.length === 0) return null;
+    return `Banner noch unvollständig – es fehlt noch: ${parts.join(", ")}. Erst dann veröffentlichen. Sage das dem Kunden ehrlich.`;
   }
 
   return {
@@ -290,20 +299,37 @@ export function buildAiTools(deps: AiToolsDeps) {
           if (!field) return { fehler: `Das Feld "${feldId}" gibt es nicht.` };
           const problem = validateDraftValue(safeTypeOf(field.type), wert, field.maxLength);
           if (problem) return { fehler: `${field.label}: ${problem}` };
+          // Banner-Regel gilt auch per Feld-ID (gemeinsam mit Publish) – sonst
+          // nähme der Chat z. B. variant="party" an, was Publish ablehnt.
+          const fieldParsed = parsePathSafe(field.path);
+          if (
+            field.file === SITE_JSON &&
+            fieldParsed.ok &&
+            fieldParsed.segments.length === 2 &&
+            fieldParsed.segments[0] === "banner" &&
+            typeof fieldParsed.segments[1] === "string"
+          ) {
+            const bannerProblem = validateBannerValue(fieldParsed.segments[1], wert);
+            if (bannerProblem) return { fehler: `Banner: ${bannerProblem}` };
+          }
           const { error } = await store.storeDraft(site.id, feldId, wert);
           if (error) return { fehler: `Entwurf konnte nicht gespeichert werden: ${error.message}` };
+          const feldHinweis = await bannerHint(field.file);
           return {
             art: "feld",
             feldId,
             wert,
             vorschau: "sofort",
             meldung: `"${field.label}" als Entwurf gespeichert, Kunde sieht es sofort in der Vorschau.`,
+            hinweis: feldHinweis,
+            veroeffentlichbar: feldHinweis === null,
           };
         }
         if (datei && pfad) {
           // Gleiche gemeinsame Prüfung wie im Publish (Dateisperre, Pfad,
-          // Typ/Länge bei bekanntem Ziel, Banner-Regeln) – gegen Live-Stand
-          // plus bereits gespeicherte Entwürfe (zusammengehörige Änderungen).
+          // Typ/Länge bei bekanntem Ziel, Banner-Regeln) – Einordnung gegen
+          // den Live-Stand, Bestand inklusive gespeicherter Entwürfe
+          // (zusammengehörige Änderungen bleiben vervollständigbar).
           if (!isAllowedFieldJsonFile(datei)) {
             return { fehler: `Die Datei "${datei}" ist kein erlaubtes Inhaltsziel (erlaubt: src/content/site.json und JSON-Dateien unter src/content/pages/).` };
           }
@@ -313,7 +339,7 @@ export function buildAiTools(deps: AiToolsDeps) {
           }
           const built = await buildCandidate(datei);
           if ("fehler" in built) return { fehler: built.fehler };
-          const verdict = classifyFreeTarget(datei, pfad, built.candidate, wert);
+          const verdict = classifyFreeTarget(datei, pfad, built.live, wert, built.candidate);
           if (!verdict.ok) return { fehler: verdict.error };
           const pp = parsePathSafe(pfad);
           const canonical = pp.ok ? `${datei}#${pp.canonical}` : null;
@@ -321,24 +347,42 @@ export function buildAiTools(deps: AiToolsDeps) {
           if (declared) {
             const problem = validateJsonValue(safeTypeOf(declared.type), wert, declared.maxLength);
             if (problem) return { fehler: `${declared.label}: ${problem}` };
-          } else if (pp.ok && canonical) {
-            // Kein deklariertes Feld: Banner-Regel oder freier Text.
-            const resolved = resolveTargetType(canonical, new Map(), datei, pp.segments);
-            if (resolved.via !== "frei" || resolved.maxLength !== undefined) {
-              const problem = validateJsonValue(resolved.type, wert, resolved.maxLength);
-              if (problem) return { fehler: `${resolved.label}: ${problem}` };
+          }
+          // Banner-Regel gilt zusätzlich immer – auch auf deklarierten Pfaden
+          // (ein Alias erbt sonst die lose Textprüfung und umgeht das Enum).
+          if (pp.ok) {
+            const segs = pp.segments;
+            if (
+              datei === SITE_JSON &&
+              segs.length === 2 &&
+              segs[0] === "banner" &&
+              typeof segs[1] === "string"
+            ) {
+              const bannerProblem = validateBannerValue(segs[1], wert);
+              if (bannerProblem) return { fehler: `Banner: ${bannerProblem}` };
+            }
+          }
+          // Feste Listen schon beim ersten Schritt ehrlich ablehnen statt
+          // einen nicht fertigstellbaren Entwurf zu beginnen (gemeinsam mit
+          // Publish: nur ausdrücklich modellierte Listen wachsen).
+          if (verdict.creation?.kind === "append" && pp.ok) {
+            const ctx = appendContextFor(pp.segments, built.live);
+            if (ctx && !findListModel(datei, ctx.listCanonical)) {
+              return { fehler: fixedListGrowError(datei, ctx.listCanonical) };
             }
           }
           const freeId = `${FREE_DRAFT_PREFIX}${datei}:${pfad}`;
           const { error } = await store.storeDraft(site.id, freeId, wert);
           if (error) return { fehler: `Entwurf konnte nicht gespeichert werden: ${error.message}` };
           // Ehrlichkeit bei unvollständigen Ergänzungen: fehlende Angaben nennen.
+          // Erlaubte Arbeitsentwürfe dürfen unvollständig sein (mit
+          // Fehlend-Liste), veröffentlichbar erst vollständig.
           let hinweis: string | null = null;
           if (verdict.creation?.kind === "append" && pp.ok) {
             const withNew = structuredClone(built.candidate);
             try {
-              setByPath(withNew, pfad, wert);
-              const missing = missingAppendKeys(pp.segments, built.live, withNew);
+              setByPath(withNew, pfad, convertEditValue(datei, pfad, wert, typeMap, built.live));
+              const missing = missingAppendKeys(datei, pp.segments, built.live, withNew);
               if (missing.length > 0) {
                 hinweis = `Noch unvollständig – ergänze noch als eigene Entwürfe: ${missing.join(", ")}. Erst dann veröffentlichen. Sage das dem Kunden ehrlich.`;
               }
@@ -349,7 +393,7 @@ export function buildAiTools(deps: AiToolsDeps) {
           if (verdict.creation?.kind === "banner" && datei === SITE_JSON) {
             const after = structuredClone(built.candidate);
             try {
-              setByPath(after, pfad, wert);
+              setByPath(after, pfad, convertEditValue(datei, pfad, wert, typeMap, built.live));
               const parts = missingBannerParts(after);
               if (parts.length > 0) {
                 hinweis = `Banner noch unvollständig – es fehlt noch: ${parts.join(", ")}. Erst dann veröffentlichen. Sage das dem Kunden ehrlich.`;
@@ -364,6 +408,7 @@ export function buildAiTools(deps: AiToolsDeps) {
             vorschau: "nach Veröffentlichen",
             meldung: `Entwurf für ${datei} (${pfad}) gespeichert, sichtbar nach dem Veröffentlichen.`,
             hinweis,
+            veroeffentlichbar: hinweis === null,
           };
         }
         return { fehler: "Bitte feldId oder datei+pfad angeben." };

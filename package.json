@@ -7,10 +7,11 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "npm run test:reparatur1 && npm run test:reparatur1b && npm run test:reparatur1c",
+    "test": "npm run test:reparatur1 && npm run test:reparatur1b && npm run test:reparatur1c && npm run test:reparatur1d",
     "test:reparatur1": "node scripts/reparatur1-check.mjs",
     "test:reparatur1b": "node scripts/reparatur1b-publish-check.mjs",
-    "test:reparatur1c": "node scripts/reparatur1c-check.mjs"
+    "test:reparatur1c": "node scripts/reparatur1c-check.mjs",
+    "test:reparatur1d": "node scripts/reparatur1d-check.mjs"
   },
   "dependencies": {
     "@ai-sdk/react": "^4.0.112",

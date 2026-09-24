@@ -2,24 +2,23 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createOctokit, getManifestRaw, getRepoFile, normalizeManifest } from "@/lib/github";
 import { getBySegments, parsePathSafe, setByPath } from "@/lib/json-path";
-import { convertStoredValue, validateDraftValue, validateJsonValue } from "@/lib/validate";
+import { validateDraftValue, validateFinalJsonValue } from "@/lib/validate";
 import {
-  BANNER_TEXT_MAX,
-  BANNER_VARIANTS,
   SITE_JSON,
   canonicalTarget,
   classifyFreeTarget,
+  convertEditValue,
   extractRawFields,
-  inferRequiredKeys,
+  getBannerProblems,
   isAllowedFieldJsonFile,
-  isPlainObject,
   parseFreeDraftIdSafe,
-  resolveTargetType,
+  resolveEditType,
   validateBannerValue,
   validateFieldTargets,
   validateFullJsonDraft,
+  validateListStructures,
 } from "@/lib/content-guard";
-import type { ResolvedTarget } from "@/lib/content-guard";
+import type { ResolvedTarget, TypeEntry } from "@/lib/content-guard";
 import {
   AI_MAX_FILE_CHARS,
   MANIFEST_PATH,
@@ -29,7 +28,7 @@ import {
   isAllowedContentPath,
   validateManifestText,
 } from "@/lib/ai";
-import type { CodeDraft, Draft, FieldType, ManifestField, Site } from "@/types/cms";
+import type { CodeDraft, Draft, Site } from "@/types/cms";
 import { FREE_DRAFT_PREFIX } from "@/types/cms";
 
 const COMMIT_MESSAGE = "cms: update content by client";
@@ -160,59 +159,40 @@ export async function POST(request: Request) {
       );
     }
 
-    // Aufgelöste Zieltypen je kanonischem Ziel (einheitlich für Manifestfeld
-    // und freien Alias – ein Alias erbt Typ, Länge und Label des Felds).
-    const manifestByCanonical = new Map<string, ManifestField>();
+    // Aufgelöste Zieltypen je kanonischem Ziel (einheitlich für Manifestfeld,
+    // freien Alias und vollständige Datei-Inhalte – dieselbe Auflösung wie im
+    // Chat; ein Alias erbt Typ, Länge und Label des Felds).
+    const typeMap = new Map<string, TypeEntry>();
     for (const f of effectiveNormalized.sections.flatMap((s) => s.fields)) {
       const c = canonicalTarget(f.file, f.path);
-      if (c && !manifestByCanonical.has(c)) manifestByCanonical.set(c, f);
+      if (c && !typeMap.has(c)) {
+        typeMap.set(c, { type: f.type, maxLength: f.maxLength, label: f.label });
+      }
     }
 
-    /** Löst Typ, Länge und Label eines Entwurfs einheitlich auf. */
+    /** Löst Typ, Länge und Label eines Entwurfs einheitlich auf (gemeinsame Logik). */
     const resolveEdit = (file: string, editPath: string, fieldId: string): ResolvedTarget => {
       const pp = parsePathSafe(editPath);
-      const canonical = pp.ok ? `${file}#${pp.canonical}` : null;
-      if (canonical) {
-        const base = resolveTargetType(canonical, manifestByCanonical, file, pp.segments);
-        if (base.via !== "frei") return base;
-        const siblingType = overrideForAppend(file, pp.segments);
-        if (siblingType) return { type: siblingType, label: base.label, via: "frei" };
-        return base;
-      }
-      const known = effectiveFieldMap.get(fieldId);
-      if (known) {
-        return { type: known.type, maxLength: known.maxLength, label: known.label, via: "manifest" };
-      }
-      return { type: "text", label: editPath, via: "frei" };
-    };
-
-    /**
-     * Geschwistertyp für Listen-Ergänzungen: Neues Blatt erbt den Typ
-     * gleichnamiger Geschwister (z. B. rating als Zahl), damit "5" nicht als
-     * Text landet und das Website-Modell bricht. Nur für exakt einen neuen
-     * Blatt-Schlüssel am Listenende; sonst null (Standard: Text).
-     */
-    const overrideForAppend = (file: string, segments: Array<string | number>): FieldType | null => {
-      const last = segments[segments.length - 1];
-      if (typeof last !== "string") return null;
-      const live = parsedJson.get(file);
-      if (!live) return null;
-      for (let k = 0; k < segments.length; k += 1) {
-        if (typeof segments[k] !== "number") continue;
-        const arr = getBySegments(live, segments.slice(0, k));
-        if (Array.isArray(arr) && arr.length === segments[k] && segments.length === k + 2) {
-          for (const el of arr) {
-            if (isPlainObject(el) && Object.prototype.hasOwnProperty.call(el, last)) {
-              const sv = (el as Record<string, unknown>)[last];
-              if (typeof sv === "number") return "number";
-              if (typeof sv === "boolean") return "boolean";
-              return null;
-            }
-          }
-          return null;
+      if (!pp.ok) {
+        const known = effectiveFieldMap.get(fieldId);
+        if (known) {
+          return { type: known.type, maxLength: known.maxLength, label: known.label, via: "manifest" };
         }
+        return { type: "text", label: editPath, via: "frei" };
       }
-      return null;
+      const r = resolveEditType(
+        file,
+        pp.segments,
+        `${file}#${pp.canonical}`,
+        typeMap,
+        parsedJson.get(file)
+      );
+      return {
+        type: r.type,
+        maxLength: r.maxLength,
+        label: r.label,
+        via: r.via === "manifest" ? "manifest" : r.via === "banner" ? "banner" : "frei",
+      };
     };
 
     // Erfüllte Alias-Entwürfe (gleicher Wert wie Manifest-Entwurf): werden nach
@@ -435,9 +415,10 @@ export async function POST(request: Request) {
 
     // Freie Ziele einordnen: Bestand schreiben oder ausdrücklich freigegebene
     // Erstellung (Banner-Felder, Listen-Ergänzung). Akzeptierte Erstellungen
-    // decken passende Manifestfeld-Pfade im selben Satz ab.
+    // decken passende Manifestfeld-Pfade im selben Satz ab. Ob eine
+    // Listen-Ergänzung veröffentlichbar ist, prüft erst die gemeinsame
+    // Strukturprüfung am fertigen Kandidaten (feste Listen wachsen nicht).
     const pendingCreations = new Set<string>();
-    const appendOps: Array<{ file: string; segments: Array<string | number>; label: string; path: string }> = [];
     for (const [filePath, fileEdits] of editsByFile) {
       for (const edit of fileEdits) {
         if (effectiveFieldMap.has(edit.fieldId)) continue;
@@ -448,12 +429,6 @@ export async function POST(request: Request) {
         }
         if (verdict.creation) {
           pendingCreations.add(verdict.creation.canonical);
-          if (verdict.creation.kind === "append") {
-            const pp = parsePathSafe(edit.path);
-            if (pp.ok) {
-              appendOps.push({ file: filePath, segments: pp.segments, label: edit.label, path: edit.path });
-            }
-          }
         }
       }
     }
@@ -509,12 +484,12 @@ export async function POST(request: Request) {
       const cand = candidateJson.get(filePath);
       if (!cand) continue; // Unerlaubte Datei – Strukturfehler folgt unten.
       for (const edit of fileEdits) {
-        const resolved = resolveEdit(filePath, edit.path, edit.fieldId);
+        const label = resolveEdit(filePath, edit.path, edit.fieldId).label;
         try {
-          setByPath(cand, edit.path, convertStoredValue(resolved.type, edit.value));
+          setByPath(cand, edit.path, convertEditValue(filePath, edit.path, edit.value, typeMap, parsedJson.get(filePath)));
         } catch (err) {
           candidateErrors.push(
-            `Feld "${resolved.label}": ${err instanceof Error ? err.message : "Pfad konnte nicht geschrieben werden."}`
+            `Feld "${label}": ${err instanceof Error ? err.message : "Pfad konnte nicht geschrieben werden."}`
           );
         }
       }
@@ -531,7 +506,9 @@ export async function POST(request: Request) {
     );
 
     // Werte im Kandidaten gegen die deklarierten Typen prüfen – einheitlich
-    // für Feldentwürfe, freie Aliase (erben Typ/Länge) und volle Dateien.
+    // und streng für Feldentwürfe, freie Aliase (erben Typ/Länge) und volle
+    // Dateien: Zahlen sind echte Zahlen, Booleans echte Booleans, Text bleibt
+    // Text, null/leer ist hier nicht erlaubt.
     for (const f of effectiveNormalized.sections.flatMap((s) => s.fields)) {
       if (!isAllowedFieldJsonFile(f.file)) continue;
       const cand = candidateJson.get(f.file);
@@ -547,103 +524,21 @@ export async function POST(request: Request) {
         continue;
       }
       if (v === undefined) continue;
-      const problem = validateJsonValue(f.type, v, f.maxLength);
+      const problem = validateFinalJsonValue(f.type, v, f.maxLength);
       if (problem) strictErrors.push(`Feld "${f.label}": ${problem}`);
     }
 
-    // Banner-Dreifaltigkeit im Kandidaten: eingeschaltet braucht Stil + Text.
+    // Banner-Endstand im Kandidaten – gilt immer bei vorhandenem Banner,
+    // auch ausgeschaltet (gemeinsame Prüfung wie im Chat).
     const siteCand = candidateJson.get(SITE_JSON);
     if (siteCand && siteCand.banner !== undefined) {
-      const banner = siteCand.banner;
-      if (!isPlainObject(banner)) {
-        strictErrors.push(`Der Banner-Bereich in ${SITE_JSON} ist beschädigt (muss ein Objekt sein).`);
-      } else {
-        const enabled = banner.enabled;
-        const on = enabled === true || (typeof enabled === "string" && enabled.trim() === "true");
-        if (on) {
-          if (typeof banner.variant !== "string" || !(BANNER_VARIANTS as readonly string[]).includes(banner.variant.trim())) {
-            strictErrors.push(`Banner ist eingeschaltet, aber der Stil ist ungültig (erlaubt: ${BANNER_VARIANTS.join(", ")}).`);
-          }
-          if (typeof banner.text !== "string" || banner.text.trim() === "") {
-            strictErrors.push(`Banner ist eingeschaltet, aber der Text fehlt.`);
-          } else if (banner.text.length > BANNER_TEXT_MAX) {
-            strictErrors.push(`Banner-Text ist zu lang (${banner.text.length} von max. ${BANNER_TEXT_MAX} Zeichen).`);
-          }
-        } else if (enabled !== false && enabled !== undefined && !(typeof enabled === "string" && enabled.trim() === "false")) {
-          strictErrors.push(`Banner-Schalter muss an oder aus sein.`);
-        }
-      }
+      strictErrors.push(...getBannerProblems(siteCand.banner));
     }
 
-    // Listen-Ergänzungen: neues Element muss zum bekannten Listen-Modell passen.
-    for (const op of appendOps) {
-      const live = parsedJson.get(op.file);
-      const cand = candidateJson.get(op.file);
-      if (!live || !cand) continue;
-      const segs = op.segments;
-      const last = segs[segs.length - 1];
-      let arrPrefix: Array<string | number> | null = null;
-      for (let k = 0; k < segs.length; k += 1) {
-        if (typeof segs[k] !== "number") continue;
-        const arr = getBySegments(live, segs.slice(0, k));
-        if (Array.isArray(arr) && arr.length === segs[k]) {
-          arrPrefix = segs.slice(0, k + 1);
-          break;
-        }
-      }
-      if (!arrPrefix) continue; // Bestandspfad – nichts zu vervollständigen.
-      const liveArr = getBySegments(live, arrPrefix.slice(0, -1));
-      if (!Array.isArray(liveArr)) continue;
-      if (typeof last !== "string") {
-        if (liveArr.length > 0 && liveArr.every(isPlainObject)) {
-          strictErrors.push(
-            `Ergänzung "${op.label}" in "${op.file}": passt nicht zum Listen-Modell (Liste enthält Objekte, kein Einzelwert).`
-          );
-        }
-        continue;
-      }
-      if (segs.length > arrPrefix.length + 1) {
-        strictErrors.push(
-          `Ergänzung "${op.label}" in "${op.file}": zu tief verschachtelt – nur ein Feld pro neuem Eintrag.`
-        );
-        continue;
-      }
-      const required = inferRequiredKeys(liveArr);
-      if (required.length === 0) {
-        strictErrors.push(
-          liveArr.length === 0
-            ? `Ergänzung "${op.label}" in "${op.file}": Die Liste ist leer – ihr Aufbau ist unbekannt. Bitte über die Agentur anlegen lassen.`
-            : `Ergänzung "${op.label}" in "${op.file}": Der Listen-Aufbau ist uneinheitlich – bitte über die Agentur prüfen lassen.`
-        );
-        continue;
-      }
-      const element = getBySegments(cand, arrPrefix);
-      const missing = required.filter((key) => {
-        const v = isPlainObject(element) ? element[key] : undefined;
-        return v === undefined || v === null || (typeof v === "string" && v.trim() === "");
-      });
-      if (missing.length > 0) {
-        strictErrors.push(
-          `Ergänzung "${op.label}" in "${op.file}": unvollständig – es fehlen noch: ${missing.join(", ")}. Alle Angaben im selben Satz liefern, dann geht es.`
-        );
-      }
-      // Keine fremden Schlüssel im neuen Element (Modell-Treue).
-      const union = new Set<string>();
-      for (const el of liveArr) {
-        if (isPlainObject(el)) {
-          for (const k of Object.keys(el)) {
-            if (!["__proto__", "constructor", "prototype"].includes(k)) union.add(k);
-          }
-        }
-      }
-      const elementKeys = isPlainObject(element) ? Object.keys(element) : [];
-      const extras = elementKeys.filter((k) => !union.has(k));
-      if (extras.length > 0) {
-        strictErrors.push(
-          `Ergänzung "${op.label}" in "${op.file}": unerlaubte Felder: ${extras.join(", ")} – das Listen-Modell kennt nur: ${[...union].join(", ") || "–"}.`
-        );
-      }
-    }
+    // Listen-Strukturen im GESAMTEN Kandidaten (gemeinsame Prüfung wie im
+    // Chat): kein Sonderweg für vollständige Dateien – feste Listen wachsen
+    // nicht, dynamische nur modellvollständig am Ende.
+    strictErrors.push(...validateListStructures(parsedJson, candidateJson));
 
     const blockingErrors = [...targetErrors, ...candidateErrors, ...strictErrors, ...valueErrors];
     if (blockingErrors.length > 0) {

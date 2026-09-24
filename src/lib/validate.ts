@@ -97,12 +97,51 @@ export function validateJsonValue(
 /**
  * Prüft einen Entwurfswert (immer String) gegen den Feldtyp.
  * Liefert null wenn ok, sonst eine deutsche Fehlermeldung für den Kunden.
+ * Rohe Formulareingaben dürfen Strings sein (z. B. "42" oder "true") –
+ * erst im fertigen Veröffentlichungsstand gelten die strikten Endtypen
+ * (siehe validateFinalJsonValue).
  */
 export function validateDraftValue(
   type: FieldType,
   value: string,
   maxLength?: number
 ): string | null {
+  return validateJsonValue(type, value, maxLength);
+}
+
+/**
+ * Prüft einen Wert im fertigen Veröffentlichungskandidaten streng gegen den
+ * deklarierten Feldtyp. Im fertigen JSON müssen Zahlen echte endliche Zahlen
+ * und Booleans echte Booleans sein; Text bleibt Text. Null und fehlende Werte
+ * sind hier nicht erlaubt (ein Entwurf darf unvollständig sein, ein
+ * veröffentlichter Stand nicht). Wird vom Veröffentlichen UND sinngemäß von
+ * den Chat-Hinweisen benutzt (eine Prüfung für alles).
+ */
+export function validateFinalJsonValue(
+  type: FieldType,
+  value: unknown,
+  maxLength?: number
+): string | null {
+  if (value === undefined) return "Dieser Wert fehlt im neuen Stand.";
+  if (value === null) {
+    return type === "number"
+      ? "Dieser Wert muss eine Zahl sein (kein leerer Wert)."
+      : type === "boolean"
+        ? "Dieser Wert muss an oder aus sein (kein leerer Wert)."
+        : `Dieser Wert muss ein Text sein (gefunden: leer).`;
+  }
+  if (type === "number") {
+    return typeof value === "number" && Number.isFinite(value)
+      ? null
+      : "Dieser Wert muss eine Zahl sein (kein Text).";
+  }
+  if (type === "boolean") {
+    return typeof value === "boolean" ? null : "Dieser Wert muss an oder aus sein (kein Text).";
+  }
+  if (typeof value !== "string") {
+    return `Dieser Wert muss ein Text sein (gefunden: ${kindOf(value)}).`;
+  }
+  // Ab hier: echter String – dieselben Formatregeln wie bei Entwürfen.
   return validateJsonValue(type, value, maxLength);
 }
 

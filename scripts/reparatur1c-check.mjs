@@ -360,7 +360,12 @@ module.exports = Object.assign({}, real, {
     ok(r.commits.length === 0 && r.draftsLeft === 1 && r.codeLeft === 1, "R-R2 kein Write, alle Entwürfe bleiben");
   }
 
-  // R-R3: Demo-Listenmodell (unvollständig vs. vollständig vs. falscher Typ)
+  // R-R3: Demo-Listenmodell – KORREKTUR 1d: Das unveränderte Demo-Schema erlaubt
+  // genau drei Einträge in testimonials.items (feste Bewertungssektion ohne
+  // dynamisches Modell). Auch eine vollständige 4. Bewertung wird daher mit
+  // 400 abgelehnt (früher fälschlich 200). Unvollständiges nennt die feste
+  // Liste als Grund; erlaubtes Wachstum gibt es nur mit ausdrücklichem Modell
+  // (siehe 1d-Nachprüfung D-L2/D-L3 mit der FAQ-Liste).
   {
     const files = Object.assign({}, BASE_FILES, {
       "src/content/pages/bewertungen.json": JSON.stringify({ testimonials: DEMO_TESTIMONIALS }),
@@ -371,7 +376,7 @@ module.exports = Object.assign({}, real, {
       drafts: [["json:src/content/pages/bewertungen.json:testimonials.items[3].quote", "Toll!"]],
       codeDrafts: [],
     });
-    ok(incomplete.status === 400 && /author/.test(incomplete.body.error || "") && /location/.test(incomplete.body.error || ""), "R-R3 unvollständige Ergänzung nennt fehlende Schlüssel");
+    ok(incomplete.status === 400 && /fest/.test(incomplete.body.error || ""), "R-R3 Ergänzung fester Liste -> 400 feste Liste");
     ok(incomplete.commits.length === 0, "R-R3 kein Write");
     const wrongType = await runScenario({
       manifest: BASE_MANIFEST,
@@ -384,7 +389,7 @@ module.exports = Object.assign({}, real, {
       ],
       codeDrafts: [],
     });
-    ok(wrongType.status === 400 && /Zahl/.test(wrongType.body.error || ""), "R-R3 falscher Typ (rating) -> 400");
+    ok(wrongType.status === 400 && /fest/.test(wrongType.body.error || ""), "R-R3 auch mit Typfehler -> 400 feste Liste");
     const complete = await runScenario({
       manifest: BASE_MANIFEST,
       files,
@@ -397,8 +402,8 @@ module.exports = Object.assign({}, real, {
       codeDrafts: [],
     });
     const items = JSON.parse(complete.repo.get("src/content/pages/bewertungen.json")).testimonials.items;
-    ok(complete.status === 200, "R-R3 vollständige Ergänzung -> 200");
-    ok(items.length === 4 && items[3].rating === 5 && items[3].author === "A. Tester", "R-R3 neues Element vollständig + typgerecht");
+    ok(complete.status === 400 && /fest/.test(complete.body.error || ""), "R-R3 vollständige 4. Bewertung -> 400 (Schema: genau drei)");
+    ok(items.length === 3 && complete.commits.length === 0, "R-R3 Liste unverändert, kein Write");
   }
 
   // R-R4: gültiges Manifest samt Inhaltsänderung im selben Satz

@@ -200,3 +200,97 @@ eigenes Thema.
 - `npm run test` → 32/32 (1) + 40/40 (1b) + 40/40 (1c: 13 Regel-, 17
   Routen-, 10 Werkzeug-Assertions). Exit-Code-Weitergabe per Absicht-Fehler
   bewiesen (1 → Fehler, 0 → sauber).
+
+---
+
+## Schritt 1d – Abschlussreparatur: gemeinsame Inhaltsprüfung, strikte Endtypen, feste Listen, Chat-Parität (Branch: `reparatur-1-content-guard`)
+
+### Fehlender Nachweis (exakt benannt)
+Das beauftragte Prüfmaterial `CMS-Reparatur-1c-Pruefung.zip` (Bericht,
+ausführbare Gegenprüfungen, Ordner `demo-original-fixture` mit den
+unveränderten Website-Regeln) lag im Arbeitsstand nicht vor – gesucht in
+`/Users/albinsalihu/Documents/agency-cms/` und `/Users/albinsalihu/Documents/`.
+Bearbeitet wurden alle im Auftragstext beschriebenen Fälle; die konkrete
+Demo-Schema-Regel (testimonials.items: genau drei Einträge, feste
+Bewertungssektion) wurde aus der Auftragsbeschreibung übernommen und als
+feste Liste ohne Wachstumsmodell umgesetzt. Ein Abgleich gegen die
+Original-Schemadatei war mangels Fixture nicht möglich.
+
+### Gemeinsame Logik für Chat und Publish (behoben)
+`src/lib/content-guard.ts` enthält jetzt die gemeinsam verwendete
+Zielauflösung (`resolveEditType`: Manifestfeld, Banner-Regel,
+Listenmodell oder freier Text), Typumwandlung (`convertEditValue`:
+nur Zahl-/Boolean-Felder werden umgewandelt, "true" in Textfeldern bleibt
+Text), Kandidatenbildung (umgewandelte Werte) und Inhaltsprüfung
+(`validateFinalJsonValue`, `getBannerProblems`, `validateListStructures`,
+`missingAppendKeys`, `findListModel`). Publish-Route und `buildAiTools`
+rufen dieselben Funktionen auf – für dasselbe Ziel gelten dieselben Regeln
+über Manifest-ID, freien Alias, vollständigen Datei-Entwurf und
+Kombinationen; jeder Satz wird vor dem ersten GitHub-Write gemeinsam am
+fertigen Kandidaten geprüft (Fail-Closed, deutsche Meldung, null Writes,
+Entwürfe bleiben). Zulässige unvollständige Arbeitsentwürfe (nur
+dynamische Listen, mit Fehlend-Liste) und veröffentlichungsfähige Inhalte
+nutzen dieselben Regeln.
+
+### Modellannahmen ersetzt (behoben)
+`inferRequiredKeys` und Nachbareinträge begründen keine Entscheidung mehr
+(Funktion nur noch Diagnose, Hinweis im Code). Verbindlich sind nur
+ausdrückliche Modelle in `DYNAMIC_LIST_MODELS` – derzeit genau ein Fall:
+`src/content/pages/faq.json`, Liste `items`, Elemente mit `frage` + `antwort`
+als Text. Alle anderen Listen sind fest und dürfen weder wachsen noch
+schrumpfen. Es gibt keine globale Drei-Einträge-Regel, kein
+Feldanzahl-Limit und keine gelockerten Website-Regeln; Website-Skripte
+werden nicht ausgeführt; Kundendaten schwächen ihre Regeln nicht ab. Das
+Editor-Manifest erweitert keine Listen (ein Manifest-Entwurf kann Slots
+nicht freischalten); die Feldliste selbst ist von der Strukturprüfung
+ausgenommen. Korrektur 1d im 1c-Test: R-R3 erwartet für die 4. Bewertung
+(auch vollständig) 400 "feste Liste" statt 200.
+
+### Vollständige Dateien ohne Sonderweg (behoben)
+Strikte Endtypen im Kandidaten (`validateFinalJsonValue`): Zahlen sind echte
+endliche Zahlen, Booleans echte Booleans, Text bleibt Text, null/leer ist
+hier kein Wert. Der Banner-Endstand (`getBannerProblems`) gilt immer bei
+vorhandenem Banner – auch ausgeschaltet (party-Stil und Überlänge werden
+abgewiesen). Belegt: quote-only-Bewertung, hero.title=null, Zahl als "42",
+ausgeschalteter Banner mit party/161 Zeichen (je 400 ohne Write, Entwürfe
+bleiben), gültige Gegenstücke (200, echte Typen), Voll-Datei+Feld-Kombi.
+
+### Chat-Ablauf mit derselben Logik (behoben)
+Feld-ID `banner.variant="party"` wird im Chat abgelehnt (Banner-Regel gilt
+auch per Feld-ID und auf deklarierten Pfaden); FAQ-Antwort nach gespeicherter
+Frage ist eine Fortsetzung (Bestand inkl. Entwürfe, Eintragsobjekt-Prüfung –
+vorhandenes gilt nicht als fehlend), inkl. Korrektur des begonnenen
+Entwurfs; Banner-an als String "true" meldet trotzdem fehlenden Stil/Text
+(umgewandelter Kandidat plus tolerante Hinweisprüfung). Feste Listen lehnt
+der Chat schon beim ersten Schritt ab (nichts gespeichert). Antworten
+enthalten zusätzlich `veroeffentlichbar` (Best-Effort-Hinweis; maßgeblich
+bleibt Publish). Chat-Entwürfe wurden gespiegelt gemeinsam veröffentlicht
+(C-F2b, C-B2c). Die drei Website-Prompts und Werkzeugbeschreibungen sind
+unverändert.
+
+### Tests 1d und Ergebnisse (lokal ausgeführt)
+- `npm run lint` → sauber (0 Fehler, 0 Warnungen).
+- `npm run build` → erfolgreich (alle 13 Seiten).
+- `npm run test` → 32/32 (1) + 40/40 (1b) + 40/40 (1c mit korrigiertem R-R3)
+  + 60/60 (1d: 17 Baustein-, 28 Publish-, 15 Chat-Assertions). Jede
+  fehlgeschlagene Assertion erzeugt Fehler-Exit-Code (ok-Muster).
+- Vor der Reparatur reproduziert: 15/40 bestanden (25 Fehler: alle vier
+  Voll-Datei-Umgehungen, 4. Bewertung angenommen, FAQ-Antwort abgewiesen,
+  Banner-party per Feld-ID angenommen, feste Liste im Chat gespeichert,
+  Banner-Hinweis bei "true" unterschlagen).
+
+### Tatsächlich unterstützte Modellregeln und verbleibende Einschränkungen
+- Unterstützt: Dateisperre, sichere Pfade, Manifest-Ziele, deklarierte
+  Typen/Längen (Aliase erben), Banner-Modell (Enum, 160 Zeichen,
+  Dreifaltigkeit, immer gültig), genau ein dynamisches Listenmodell (FAQ),
+  Alias-Aufräumen nach Wert-Rückprüfung, 500+-Felder-Bestände mit Nachladen.
+- Einschränkungen (ehrlich): Listenwachstum nur für ausdrücklich
+  modellierte Listen (Erweiterung nur im Code durch die Agentur); zusätzliche
+  Skalar-Schlüssel in Voll-Dateien ohne Modell und gleichlange
+  Formänderungen nicht deklarierter Elemente sind außer Reichweite (Manifest
+  ist nicht das volle Datenmodell); Kürzen dynamischer Listen zulässig (kein
+  Mindestmaß modelliert); leere Zahl-/Boolean-Felder sind erst nach Befüllen
+  veröffentlichbar; `veroeffentlichbar` ist eine Chat-Einschätzung.
+- Weiter offen (separate Pakete, wie bisher): RLS/Policies, parallele
+  Publisher, atomare Multi-Datei-Releases nach dem ersten Commit,
+  Token-Trennung, KI-Kostenlimits. Keine pauschale Produktionsfreigabe.
