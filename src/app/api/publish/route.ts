@@ -199,15 +199,22 @@ export async function POST(request: Request) {
 
     // Erfüllte Alias-Entwürfe (gleicher Wert wie Manifest-Entwurf): werden nach
     // Erfolg mit aufgeräumt, damit keine erledigten Dubletten liegen bleiben.
-    const fulfilledAliases: Array<{ id: string; value: string }> = [];
+    const fulfilledAliases: Array<{ id: string; value: string; file: string }> = [];
 
     // Entwürfe auflösen: Manifest-Feld, freier JSON-Pfad oder unbekannt.
     // Freie IDs ("json:<datei>:<pfad>") müssen der Dateisperre und der
-    // Pfad-Sicherheit genügen – ein Verstoß bricht den gesamten Satz ab.
-    // Unbekannte IDs ohne json-Präfix bleiben als Entwurf erhalten (wie bisher).
+    // Pfad-Sicherheit genügen. Zielprobleme werden JE DATEI gesammelt:
+    // Was eine Datei blockiert, hält den Rest des Satzes nicht auf
+    // (Teilveröffentlichung); nur Fundament-Fehler brechen alles ab.
     const editsByFile = new Map<string, FileEdit[]>();
     const skipped: string[] = [];
-    const targetErrors: string[] = [];
+    const blocked = new Map<string, string[]>();
+    /** Vermerkt einen Dateifehler (Datei bleibt unveröffentlicht, Rest läuft weiter). */
+    const block = (file: string, message: string): void => {
+      const list = blocked.get(file) ?? [];
+      list.push(message);
+      blocked.set(file, list);
+    };
     const freeTargets: Array<{ draft: Draft; file: string; path: string }> = [];
     for (const draft of typedDrafts) {
       const field = effectiveFieldMap.get(draft.field_id);
@@ -226,7 +233,11 @@ export async function POST(request: Request) {
       if (draft.field_id.startsWith(FREE_DRAFT_PREFIX)) {
         const parsed = parseFreeDraftIdSafe(draft.field_id);
         if (!parsed.ok) {
-          targetErrors.push(parsed.error);
+          // Datei erkennbar? Dann blockiert nur sie; sonst bleibt der
+          // Eintrag als Entwurf erhalten und wird offengelegt.
+          const maybeFile = draft.field_id.slice(FREE_DRAFT_PREFIX.length).split(":")[0] ?? "";
+          if (maybeFile !== "") block(maybeFile, parsed.error);
+          else skipped.push(draft.field_id);
           continue;
         }
         freeTargets.push({ draft, file: parsed.file, path: parsed.path });
@@ -253,24 +264,26 @@ export async function POST(request: Request) {
     for (const free of freeTargets) {
       const canonical = canonicalTarget(free.file, free.path);
       if (!canonical) {
-        targetErrors.push(`Entwurf "${free.draft.field_id}": ungültiger Pfad.`);
+        block(free.file, `Entwurf "${free.draft.field_id}": ungültiger Pfad.`);
         continue;
       }
       const manifestValue = manifestEditTargets.get(canonical);
       if (manifestValue !== undefined) {
         if (manifestValue !== free.draft.value) {
-          targetErrors.push(
+          block(
+            free.file,
             `Entwurf "${free.draft.field_id}": Das Ziel wird in diesem Satz bereits anders beschrieben – bitte nur eine Stelle ändern.`
           );
         } else {
           // Gleicher Wert: Der Manifest-Entwurf deckt es ab – der Alias gilt
           // als erfüllt und wird nach Erfolg mit aufgeräumt.
-          fulfilledAliases.push({ id: free.draft.id, value: free.draft.value });
+          fulfilledAliases.push({ id: free.draft.id, value: free.draft.value, file: free.file });
         }
         continue;
       }
       if (seenFreeCanonicals.has(canonical)) {
-        targetErrors.push(
+        block(
+          free.file,
           `Entwurf "${free.draft.field_id}": Das Ziel ist in diesem Satz doppelt vergeben (andere Schreibweise desselben Pfads?).`
         );
         continue;
@@ -287,10 +300,37 @@ export async function POST(request: Request) {
       editsByFile.set(free.file, list);
     }
 
+    // Fundament-Prüfung (global): Doppelte Feld-IDs und verbotene Manifest-
+    // Ziele betreffen die gemeinsame Grundlage – hier bricht der ganze Satz
+    // ab. Alles andere blockiert nur die eigene Datei (Teilveröffentlichung).
+    {
+      const seenIds = new Set<string>();
+      for (const entry of extractRawFields(effectiveManifestRaw)) {
+        if (typeof entry !== "object" || entry === null) continue;
+        const f = entry as { id?: unknown; file?: unknown };
+        if (typeof f.id === "string" && f.id.trim() !== "") {
+          if (seenIds.has(f.id)) {
+            return NextResponse.json(
+              { error: `Bitte korrigiere zuerst diese Punkte (es wurde nichts veröffentlicht, Entwürfe bleiben erhalten):\n- Feld "${f.id}" ist doppelt vergeben.` },
+              { status: 400 }
+            );
+          }
+          seenIds.add(f.id);
+        }
+        if (typeof f.file === "string" && !isAllowedFieldJsonFile(f.file)) {
+          return NextResponse.json(
+            { error: `Bitte korrigiere zuerst diese Punkte (es wurde nichts veröffentlicht, Entwürfe bleiben erhalten):\n- Feld "${typeof f.id === "string" ? f.id : "?"}" zeigt auf verbotene Datei "${f.file}" (erlaubt: src/content/site.json und JSON-Dateien unter src/content/pages/).` },
+            { status: 400 }
+          );
+        }
+      }
+    }
+
     // Vollständige Datei-Entwürfe prüfen (Whitelist, Größe, Geheimnisse).
     // JSON-Inhaltsdateien müssen zusätzlich der Dateisperre für normale
     // Inhaltsziele genügen und saubere Objekte sein – sonst ließe sich die
-    // Inhaltsprüfung über einen Komplett-Entwurf umgehen. Alles vor jedem Commit.
+    // Inhaltsprüfung über einen Komplett-Entwurf umgehen. Fehler blockieren
+    // nur die eigene Datei; die Feldliste als Fundament bricht alles ab.
     const codeByFile = new Map<string, CodeDraft>();
     for (const cd of codeDrafts) {
       const isManifest = cd.file_path === MANIFEST_PATH;
@@ -298,22 +338,16 @@ export async function POST(request: Request) {
       const isCode = isAllowedCodePath(cd.file_path);
       const isBlog = BLOG_MD.test(cd.file_path);
       if (!isManifest && !isContent && !isCode && !isBlog) {
-        return NextResponse.json(
-          { error: `Die Datei "${cd.file_path}" darf nicht veröffentlicht werden (Tabu-Bereich). Entwurf wurde nicht angerührt.` },
-          { status: 400 }
-        );
+        block(cd.file_path, `Die Datei "${cd.file_path}" darf nicht veröffentlicht werden (Tabu-Bereich). Entwurf wurde nicht angerührt.`);
+        continue;
       }
       if (cd.content.length > AI_MAX_FILE_CHARS) {
-        return NextResponse.json(
-          { error: `Die Datei "${cd.file_path}" ist zu groß. Bitte in kleinere Schritte aufteilen.` },
-          { status: 400 }
-        );
+        block(cd.file_path, `Die Datei "${cd.file_path}" ist zu groß. Bitte in kleinere Schritte aufteilen.`);
+        continue;
       }
       if (findsSecret(cd.content)) {
-        return NextResponse.json(
-          { error: `Die Datei "${cd.file_path}" sieht nach Schlüssel oder Passwort aus. So etwas gehört niemals in Dateien.` },
-          { status: 400 }
-        );
+        block(cd.file_path, `Die Datei "${cd.file_path}" sieht nach Schlüssel oder Passwort aus. So etwas gehört niemals in Dateien.`);
+        continue;
       }
       if (isManifest) {
         const problem = validateManifestText(cd.content);
@@ -326,17 +360,13 @@ export async function POST(request: Request) {
       }
       if (isContent && cd.file_path.endsWith(".json") && !isManifest) {
         if (!isAllowedFieldJsonFile(cd.file_path)) {
-          return NextResponse.json(
-            { error: `Die Datei "${cd.file_path}" ist kein erlaubtes Inhaltsziel (erlaubt: src/content/site.json und JSON-Dateien unter src/content/pages/). Entwurf wurde nicht angerührt.` },
-            { status: 400 }
-          );
+          block(cd.file_path, `Die Datei "${cd.file_path}" ist kein erlaubtes Inhaltsziel (erlaubt: src/content/site.json und JSON-Dateien unter src/content/pages/). Entwurf wurde nicht angerührt.`);
+          continue;
         }
         const problem = validateFullJsonDraft(cd.content);
         if (problem) {
-          return NextResponse.json(
-            { error: `Die Datei "${cd.file_path}" kann so nicht übernommen werden: ${problem} Entwurf wurde nicht angerührt.` },
-            { status: 400 }
-          );
+          block(cd.file_path, `Die Datei "${cd.file_path}" kann so nicht übernommen werden: ${problem} Entwurf wurde nicht angerührt.`);
+          continue;
         }
       }
       codeByFile.set(cd.file_path, cd);
@@ -344,8 +374,8 @@ export async function POST(request: Request) {
 
     // Nichts zu tun? Dann ehrlich melden (kein stilles "Erfolg").
     // Hinweis: Unbekannte Entwurfs-IDs landen in "skipped" und werden in der
-    // Antwort offengelegt; alle anderen Fehler brechen unten bereits ab.
-    if (editsByFile.size === 0 && codeByFile.size === 0 && targetErrors.length === 0) {
+    // Antwort offengelegt.
+    if (editsByFile.size === 0 && codeByFile.size === 0 && blocked.size === 0) {
       const skippedNote =
         skipped.length > 0
           ? ` (${skipped.length} Eintrag/Einträge ohne Zuordnung bleiben als Entwurf erhalten).`
@@ -362,6 +392,7 @@ export async function POST(request: Request) {
     const committedFields: string[] = [];
     const committedDraftIds: string[] = [];
     const committedFiles: string[] = [];
+    const publishedFieldIds: string[] = [];
     const payload: Record<string, Record<string, unknown>> = {};
     let lastCommitSha: string | null = null;
 
@@ -377,6 +408,8 @@ export async function POST(request: Request) {
 
     const baseFiles = new Map<string, { text: string; sha: string }>();
     for (const filePath of loadFiles) {
+      // Bereits blockierte Dateien werden nicht mehr geladen.
+      if (blocked.has(filePath)) continue;
       try {
         const file = await getRepoFile(octokit, typedSite.repo_owner, typedSite.repo_name, filePath);
         baseFiles.set(filePath, {
@@ -389,29 +422,25 @@ export async function POST(request: Request) {
           baseFiles.set(filePath, { text: "", sha: "" });
           continue;
         }
-        return NextResponse.json(
-          {
-            error: `Datei "${filePath}" konnte nicht aus GitHub geladen werden: ${
-              err instanceof Error ? err.message : "Unbekannter Fehler"
-            }`,
-          },
-          { status: 502 }
+        block(
+          filePath,
+          `Datei "${filePath}" konnte nicht aus GitHub geladen werden: ${
+            err instanceof Error ? err.message : "Unbekannter Fehler"
+          }`
         );
       }
     }
 
     // Server-Manifest gegen die geladenen Inhalte prüfen (Struktur, Typen,
     // Dateisperre, Duplikate, Pfad-Existenz) – vor jedem Repository-Schreibvorgang.
+    // Kaputte Live-Dateien blockieren nur ihre eigene Datei.
     const parsedJson = new Map<string, Record<string, unknown>>();
     for (const [filePath, base] of baseFiles) {
       if (!filePath.endsWith(".json") || BLOG_MD.test(filePath)) continue;
       try {
         parsedJson.set(filePath, JSON.parse(base.text) as Record<string, unknown>);
       } catch {
-        return NextResponse.json(
-          { error: `Die Datei "${filePath}" enthält kein gültiges JSON und kann nicht gespeichert werden. Entwürfe bleiben erhalten.` },
-          { status: 400 }
-        );
+        block(filePath, `Die Datei "${filePath}" enthält kein gültiges JSON und kann nicht gespeichert werden. Entwürfe bleiben erhalten.`);
       }
     }
 
@@ -422,11 +451,12 @@ export async function POST(request: Request) {
     // Strukturprüfung am fertigen Kandidaten (feste Listen wachsen nicht).
     const pendingCreations = new Set<string>();
     for (const [filePath, fileEdits] of editsByFile) {
+      if (blocked.has(filePath)) continue;
       for (const edit of fileEdits) {
         if (effectiveFieldMap.has(edit.fieldId)) continue;
         const verdict = classifyFreeTarget(filePath, edit.path, parsedJson.get(filePath), edit.value);
         if (!verdict.ok) {
-          targetErrors.push(`Entwurf "${edit.fieldId}": ${verdict.error}`);
+          block(filePath, `Entwurf "${edit.fieldId}": ${verdict.error}`);
           continue;
         }
         if (verdict.creation) {
@@ -437,13 +467,14 @@ export async function POST(request: Request) {
 
     // Einheitliche Wertprüfung je Entwurf (Manifestfeld UND freier Alias):
     // Typ, Länge und Banner-Regeln gelten unabhängig vom Zugriffsweg.
-    const valueErrors: string[] = [];
+    // Fehler blockieren nur die eigene Datei.
     for (const [filePath, fileEdits] of editsByFile) {
+      if (blocked.has(filePath)) continue;
       for (const edit of fileEdits) {
         const resolved = resolveEdit(filePath, edit.path, edit.fieldId);
         const problem = validateDraftValue(resolved.type, edit.value, resolved.maxLength);
         if (problem) {
-          valueErrors.push(`${resolved.label}: ${problem}`);
+          block(filePath, `${resolved.label}: ${problem}`);
           continue;
         }
         const pp = parsePathSafe(edit.path);
@@ -455,7 +486,7 @@ export async function POST(request: Request) {
           typeof pp.segments[1] === "string"
         ) {
           const bannerProblem = validateBannerValue(pp.segments[1], edit.value);
-          if (bannerProblem) valueErrors.push(`Banner: ${bannerProblem}`);
+          if (bannerProblem) block(filePath, `Banner: ${bannerProblem}`);
         }
       }
     }
@@ -464,132 +495,134 @@ export async function POST(request: Request) {
     // alle Entwürfe mit einheitlich aufgelöster Typ-Umwandlung einarbeiten.
     // Erst dieser Stand wird streng geprüft – nicht alte Dateien.
     const candidateJson = new Map<string, Record<string, unknown>>();
-    const candidateErrors: string[] = [];
     for (const [filePath, live] of parsedJson) {
       const code = codeByFile.get(filePath);
       if (code) {
         try {
           const parsed = JSON.parse(code.content) as unknown;
           if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-            candidateErrors.push(`Die Datei "${filePath}" muss ein JSON-Objekt sein.`);
+            block(filePath, `Die Datei "${filePath}" muss ein JSON-Objekt sein.`);
             continue;
           }
           candidateJson.set(filePath, parsed as Record<string, unknown>);
         } catch {
-          candidateErrors.push(`Die Datei "${filePath}" enthält kein gültiges JSON.`);
+          block(filePath, `Die Datei "${filePath}" enthält kein gültiges JSON.`);
         }
       } else {
         candidateJson.set(filePath, structuredClone(live));
       }
     }
     for (const [filePath, fileEdits] of editsByFile) {
+      if (blocked.has(filePath)) continue;
       const cand = candidateJson.get(filePath);
-      if (!cand) continue; // Unerlaubte Datei – Strukturfehler folgt unten.
+      if (!cand) continue; // Datei fehlt oder ist blockiert.
       for (const edit of fileEdits) {
         const label = resolveEdit(filePath, edit.path, edit.fieldId).label;
         try {
           setByPath(cand, edit.path, convertEditValue(filePath, edit.path, edit.value, typeMap, parsedJson.get(filePath)));
         } catch (err) {
-          candidateErrors.push(
+          block(
+            filePath,
             `Feld "${label}": ${err instanceof Error ? err.message : "Pfad konnte nicht geschrieben werden."}`
           );
         }
       }
     }
 
-    // Strenge Prüfung des EFFEKTIVEN Manifests gegen den KANDIDATEN:
-    // IDs, Typen, Duplikate, erlaubte Dateien, sämtliche Feldziele im neuen
-    // Stand. So fällt z. B. ein home.json-Entwurf mit {} auf (Ziele entfallen)
-    // und ein Manifest-Entwurf mit package.json-Ziel wird abgewiesen.
-    const strictErrors = validateFieldTargets(
-      extractRawFields(effectiveManifestRaw),
-      candidateJson,
-      pendingCreations
-    );
-
-    // Werte im Kandidaten gegen die deklarierten Typen prüfen – einheitlich
-    // und streng für Feldentwürfe, freie Aliase (erben Typ/Länge) und volle
-    // Dateien: Zahlen sind echte Zahlen, Booleans echte Booleans, Text bleibt
-    // Text, null/leer ist hier nicht erlaubt.
-    for (const f of effectiveNormalized.sections.flatMap((s) => s.fields)) {
-      if (!isAllowedFieldJsonFile(f.file)) continue;
-      const cand = candidateJson.get(f.file);
-      if (!cand) continue;
-      const v = getBySegments(cand, (() => {
-        const pp = parsePathSafe(f.path);
-        return pp.ok ? pp.segments : [];
-      })());
-      if (v === undefined && parsePathSafe(f.path).ok) {
-        strictErrors.push(
-          `Feld "${f.label}": Pfad "${f.path}" fehlt im neuen Stand von "${f.file}" – die Änderung passt nicht zum Content-Modell.`
-        );
-        continue;
-      }
-      if (v === undefined) continue;
-      const problem = validateFinalJsonValue(f.type, v, f.maxLength);
-      if (problem) strictErrors.push(`Feld "${f.label}": ${problem}`);
-    }
-
-    // Banner-Endstand im Kandidaten – gilt immer bei vorhandenem Banner,
-    // auch ausgeschaltet (gemeinsame Prüfung wie im Chat).
-    const siteCand = candidateJson.get(SITE_JSON);
-    if (siteCand && siteCand.banner !== undefined) {
-      strictErrors.push(...getBannerProblems(siteCand.banner));
-    }
-
-    // Listen-Strukturen im GESAMTEN Kandidaten (gemeinsame Prüfung wie im
-    // Chat): kein Sonderweg für vollständige Dateien – Modelle gelten für
-    // alle endgültigen Elemente, feste Listen behalten exakt ihre Form,
-    // Typen außerhalb der Feldliste bleiben erhalten.
+    // Strenge Prüfung je ANGEFASSTER Datei (Mittelweg: Unberührtes blockiert
+    // nichts mehr): effektives Manifest, strikte Endtypen, Banner-Endstand,
+    // Listen-Strukturen und Typtreue – jeweils nur dort, wo der Satz schreibt.
     const isCovered = makeCoveragePredicate(typeMap);
-    strictErrors.push(...validateListStructures(parsedJson, candidateJson, isCovered));
-    strictErrors.push(...validateScalarTypePreservation(parsedJson, candidateJson, isCovered));
-
-    const blockingErrors = [...targetErrors, ...candidateErrors, ...strictErrors, ...valueErrors];
-    if (blockingErrors.length > 0) {
-      return NextResponse.json(
-        {
-          error: `Bitte korrigiere zuerst diese Punkte (es wurde nichts veröffentlicht, Entwürfe bleiben erhalten):\n- ${blockingErrors.join("\n- ")}`,
-        },
-        { status: 400 }
+    const touchedJsonFiles = new Set<string>();
+    for (const [filePath] of editsByFile) {
+      if (candidateJson.has(filePath)) touchedJsonFiles.add(filePath);
+    }
+    for (const [filePath] of codeByFile) {
+      if (filePath.endsWith(".json") && candidateJson.has(filePath)) touchedJsonFiles.add(filePath);
+    }
+    const fieldsOfFile = (file: string) =>
+      effectiveNormalized.sections.flatMap((s) => s.fields).filter((f) => f.file === file);
+    for (const filePath of touchedJsonFiles) {
+      if (blocked.has(filePath)) continue;
+      const cand = candidateJson.get(filePath);
+      const live = parsedJson.get(filePath);
+      if (!cand || !live) continue;
+      // Manifest-Ziele dieser Datei im neuen Stand.
+      const fileFieldErrors = validateFieldTargets(
+        fieldsOfFile(filePath),
+        new Map([[filePath, cand]]),
+        pendingCreations
       );
+      for (const e of fileFieldErrors) block(filePath, e);
+      // Strikte Endtypen dieser Datei.
+      for (const f of fieldsOfFile(filePath)) {
+        const pp = parsePathSafe(f.path);
+        const v = pp.ok ? getBySegments(cand, pp.segments) : undefined;
+        if (v === undefined && pp.ok) {
+          block(
+            filePath,
+            `Feld "${f.label}": Pfad "${f.path}" fehlt im neuen Stand von "${f.file}" – die Änderung passt nicht zum Content-Modell.`
+          );
+          continue;
+        }
+        if (v === undefined) continue;
+        const problem = validateFinalJsonValue(f.type, v, f.maxLength);
+        if (problem) block(filePath, `Feld "${f.label}": ${problem}`);
+      }
+      // Banner-Endstand (nur site.json, nur wenn angefasst).
+      if (filePath === SITE_JSON && cand.banner !== undefined) {
+        for (const p of getBannerProblems(cand.banner)) block(filePath, p);
+      }
+      // Listen + Typtreue dieser Datei.
+      const liveM = new Map([[filePath, live]]);
+      const candM = new Map([[filePath, cand]]);
+      for (const e of validateListStructures(liveM, candM, isCovered)) block(filePath, e);
+      for (const e of validateScalarTypePreservation(liveM, candM, isCovered)) block(filePath, e);
     }
 
     // Abschluss: Der geprüfte Kandidat wird versandfertig gemacht – nur
-    // Dateien mit Entwürfen. JSON kommt aus dem Kandidaten, Text-Dateien
-    // (Blog, Code) komplett aus dem Entwurf (Brücken-Check wie bisher).
+    // Dateien mit Entwürfen und ohne Blockade. JSON kommt aus dem Kandidaten,
+    // Text-Dateien (Blog, Code) komplett aus dem Entwurf (Brücken-Check).
     const finalContent = new Map<string, { text: string; kind: "json" | "text" }>();
     for (const [filePath, cand] of candidateJson) {
       if (!editsByFile.has(filePath) && !codeByFile.has(filePath)) continue;
+      if (blocked.has(filePath)) continue;
       finalContent.set(filePath, { text: JSON.stringify(cand, null, 2), kind: "json" });
       payload[filePath] = cand;
     }
-    const bridgeErrors: string[] = [];
     for (const [filePath, code] of codeByFile) {
       if (filePath.endsWith(".json")) continue;
+      if (blocked.has(filePath)) continue;
       const base = baseFiles.get(filePath);
       if (!base) {
         skipped.push(filePath);
         continue;
       }
       if (isAllowedCodePath(filePath) && breaksBridge(base.text, code.content)) {
-        bridgeErrors.push(
+        block(
+          filePath,
           `Die Datei "${filePath}" würde die CMS-Vorschau-Brücke entfernen. So kann sie nicht live gehen – bitte Version mit Brücke einreichen.`
         );
         continue;
       }
       finalContent.set(filePath, { text: code.content, kind: "text" });
     }
-    if (bridgeErrors.length > 0) {
+
+    // Nichts veröffentlichbar? Dann ehrlich als Ganzes ablehnen (Status 400,
+    // keine Writes, alle Entwürfe bleiben) – wie bisher bei reinen Fehlersätzen.
+    if (finalContent.size === 0) {
+      const all = [...blocked.entries()].flatMap(([file, msgs]) => msgs.map((m) => `[${file}] ${m}`));
       return NextResponse.json(
         {
-          error: `Bitte korrigiere zuerst diese Punkte (es wurde nichts veröffentlicht, Entwürfe bleiben erhalten):\n- ${bridgeErrors.join("\n- ")}`,
+          error: `Bitte korrigiere zuerst diese Punkte (es wurde nichts veröffentlicht, Entwürfe bleiben erhalten):\n- ${all.join("\n- ")}`,
         },
         { status: 400 }
       );
     }
 
-    // Phase 2: jetzt erst committen (alles wurde oben geprüft)
+    // Phase 2: jetzt erst committen (alles wurde oben je Datei geprüft).
+    // Schlägt ein Commit fehl, laufen die übrigen weiter (Teilveröffentlichung).
+    const commitFailed: Array<{ file: string; error: string }> = [];
     for (const [filePath, final] of finalContent) {
       const base = baseFiles.get(filePath)!;
       try {
@@ -604,14 +637,15 @@ export async function POST(request: Request) {
         });
         lastCommitSha = commitData.commit.sha ?? null;
       } catch (err) {
-        return NextResponse.json(
-          {
-            error: `GitHub-Commit für "${filePath}" fehlgeschlagen: ${
-              err instanceof Error ? err.message : "Unbekannter Fehler"
-            }`,
-          },
-          { status: 502 }
-        );
+        commitFailed.push({
+          file: filePath,
+          error: `GitHub-Commit für "${filePath}" fehlgeschlagen: ${
+            err instanceof Error ? err.message : "Unbekannter Fehler"
+          }`,
+        });
+        delete payload[filePath];
+        finalContent.delete(filePath);
+        continue;
       }
       if (final.kind === "text") {
         // Text-Dateien als Rohtext sichern (für echtes Wiederherstellen)
@@ -621,6 +655,7 @@ export async function POST(request: Request) {
       const edits = editsByFile.get(filePath) ?? [];
       committedFields.push(...edits.map((e) => e.label));
       committedDraftIds.push(...edits.map((e) => e.draftId));
+      publishedFieldIds.push(...edits.map((e) => e.fieldId));
     }
 
     // Snapshot in publish_history speichern (vollständiger Stand pro Datei)
@@ -668,19 +703,21 @@ export async function POST(request: Request) {
     }
 
     // Erfüllte Alias-Entwürfe aufräumen: Sie wurden durch den gleichwertigen
-    // Manifest-Entwurf miterfüllt. Gelöscht wird nur, wessen Wert sich
-    // seitdem nicht geändert hat (kein Pauschal-Löschen, kein Fremdverlust).
+    // Manifest-Entwurf miterfüllt – aber nur, wenn dessen Datei wirklich
+    // veröffentlicht wurde. Gelöscht wird nur, wessen Wert sich seitdem nicht
+    // geändert hat (kein Pauschal-Löschen, kein Fremdverlust).
     // Grenze: Gleichzeitige parallele Veröffentlichungen bleiben ein eigenes Thema.
     let cleanedAliases = 0;
-    if (fulfilledAliases.length > 0) {
-      const aliasIds = fulfilledAliases.map((a) => a.id);
+    const publishedAliases = fulfilledAliases.filter((a) => committedFiles.includes(a.file));
+    if (publishedAliases.length > 0) {
+      const aliasIds = publishedAliases.map((a) => a.id);
       const { data: aliasRows } = await supabase
         .from("drafts")
         .select("id,value")
         .eq("site_id", siteId)
         .in("id", aliasIds);
       const stillSame = ((aliasRows ?? []) as Array<{ id: string; value: string }>)
-        .filter((row) => fulfilledAliases.some((a) => a.id === row.id && a.value === row.value))
+        .filter((row) => publishedAliases.some((a) => a.id === row.id && a.value === row.value))
         .map((row) => row.id);
       if (stillSame.length > 0) {
         const { error: aliasDeleteError } = await supabase
@@ -704,11 +741,22 @@ export async function POST(request: Request) {
       cleanedAliases > 0
         ? ` Gleichwertige Dubletten wurden mit aufgeräumt (${cleanedAliases}).`
         : "";
+    const blockedList = [...blocked.entries()].map(([file, errors]) => ({ file, errors }));
+    const blockedNote =
+      blockedList.length > 0
+        ? ` Zurückgehalten: ${blockedList.map((b) => `${b.file} (${b.errors[0]})`).join("; ")}.`
+        : "";
+    const failedNote =
+      commitFailed.length > 0
+        ? ` Fehlgeschlagen: ${commitFailed.map((f) => `${f.file} (${f.error})`).join("; ")}.`
+        : "";
 
     return NextResponse.json({
-      message: `${committedFiles.length} Datei(en) veröffentlicht.${skippedNote}${aliasNote}`,
+      message: `${committedFiles.length} Datei(en) veröffentlicht.${skippedNote}${aliasNote}${blockedNote}${failedNote}`,
       publishedFields: committedFields,
       publishedFiles: committedFiles,
+      publishedFieldIds,
+      blocked: blockedList,
       // Echter Versions-Stempel für den Aufbau-Check (Vercel meldet den Bau-Status daran)
       commitSha: lastCommitSha,
     });

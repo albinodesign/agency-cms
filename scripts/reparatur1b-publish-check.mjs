@@ -265,7 +265,7 @@ module.exports = Object.assign({}, real, {
     };
   }
 
-  // S1: gültig + unerlaubt -> 400, kein Write, Entwürfe bleiben
+  // S1: gültig + unerlaubt -> 200 teilveröffentlicht (Rest bleibt Entwurf)
   {
     const r = await runScenario({
       manifest: BASE_MANIFEST,
@@ -273,10 +273,11 @@ module.exports = Object.assign({}, real, {
       drafts: [["hero.title", "Neu"], ["json:package.json:scripts", "x"]],
       codeDrafts: [],
     });
-    ok(r.status === 400, "S1 gemischt ungültig -> 400");
-    ok(r.commits.length === 0, "S1 kein Repository-Schreibvorgang");
-    ok(r.draftsLeft === 2, "S1 Entwürfe bleiben erhalten");
-    ok(JSON.parse(r.repo.get("src/content/pages/home.json")).hero.title === "Alt", "S1 Live-Datei unverändert");
+    ok(r.status === 200, "S1 gemischt -> 200 teilveröffentlicht");
+    ok(r.commits.length === 1, "S1 nur die gültige Datei geschrieben");
+    ok(r.draftsLeft === 1, "S1 unerlaubter Entwurf bleibt erhalten");
+    ok(JSON.parse(r.repo.get("src/content/pages/home.json")).hero.title === "Neu", "S1 gültige Änderung live");
+    ok(JSON.stringify(r.body.blocked || []).includes("package.json"), "S1 Blockade wird genannt");
   }
 
   // S2: nur gültig -> 200, Write, Entwürfe weg
@@ -314,17 +315,18 @@ module.exports = Object.assign({}, real, {
     ok(r.draftsLeft === 0, "S3 Entwürfe gelöscht");
   }
 
-  // S4: beliebiger neuer Schlüssel -> 400, nichts geschrieben
+  // S4: neuer Schlüssel in einer Datei -> diese Datei zurückhalten, Rest live
   {
     const r = await runScenario({
       manifest: BASE_MANIFEST,
       files: BASE_FILES,
-      drafts: [["hero.title", "Neu"], ["json:src/content/site.json:hero.neu", "x"]],
+      drafts: [["preis.betrag", "15"], ["json:src/content/site.json:hero.neu", "x"]],
       codeDrafts: [],
     });
-    ok(r.status === 400, "S4 neuer Schlüssel -> 400");
-    ok(r.commits.length === 0, "S4 kein Repository-Schreibvorgang");
-    ok(r.draftsLeft === 2, "S4 Entwürfe bleiben erhalten");
+    ok(r.status === 200, "S4 neuer Schlüssel -> 200 teilveröffentlicht");
+    ok(r.commits.length === 1, "S4 nur die gültige Datei geschrieben");
+    ok(r.draftsLeft === 1, "S4 fehlerhafter Entwurf bleibt erhalten");
+    ok(JSON.parse(r.repo.get("src/content/pages/preise.json")).preis.betrag === 15, "S4 gültige Änderung live");
   }
 
   // S5: volle Datei außerhalb der Sperre + __proto__-Datei -> 400

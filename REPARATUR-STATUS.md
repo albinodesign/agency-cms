@@ -334,3 +334,23 @@ unverändert.
 - Weiter offen (separate Pakete, wie bisher): RLS/Policies, parallele
   Publisher, atomare Multi-Datei-Releases nach dem ersten Commit,
   Token-Trennung, KI-Kostenlimits. Keine pauschale Produktionsfreigabe.
+
+---
+
+## Teilveröffentlichung statt Alles-oder-nichts (Mittelweg, Branch `main`)
+- **Problem:** Jeder Einzelfehler stoppte den ganzen Satz (400, null Writes) –
+  auch wenn 9 von 10 Dateien fehlerfrei waren oder der Fehler in unberührten
+  Altdaten lag. Gültige Arbeit blieb liegen.
+- **Neues Verhalten:** Geprüft und geschrieben wird je angefasster Datei.
+  Unberührte Dateien blockieren nichts mehr. Jede saubere Datei geht live
+  (Commit, Verlauf nur mit Veröffentlichtem); blockierte Dateien bleiben als
+  Entwurf erhalten und werden je Datei mit Grund in `blocked` genannt. Die
+  Antwort enthält `publishedFieldIds`, damit der Editor genau diese Felder als
+  live markiert (Rest bleibt dirty). Rein fehlerhafte Sätze weiter 400 ohne
+  Writes. Fundament-Fehler (doppelte Feld-IDs, verbotene Manifest-Ziele,
+  ungültiger Manifest-Entwurf) brechen weiter alles ab.
+- **Hart bleiben:** Anmeldung/Zugriff, Dateisperre, Secrets, Brücke,
+  gefährliche Schlüssel, feste Listen, Banner-/Typregeln für Angefasstes.
+- **Tests:** S1/S4/R-R1/D-F2 auf Teilverhalten umgestellt, neu E-P1/E-P2
+  (Teilveröffentlichung + `publishedFieldIds`/`blocked`, rein fehlerhaft 400).
+  Stand: 32 + 42 + 41 + 87 = 202 Assertions, Lint sauber, Build erfolgreich.

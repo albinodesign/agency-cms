@@ -326,8 +326,9 @@ module.exports = Object.assign({}, real, {
       drafts: [["preis.betrag", "12"]],
       codeDrafts: [["src/content/pages/home.json", JSON.stringify(home)]],
     });
-    ok(r.status === 400 && r.commits.length === 0, "D-F2 volle Datei mit hero.title=null -> 400 ohne Write");
-    ok(r.draftsLeft === 1 && r.codeLeft === 1, "D-F2 alle Entwürfe bleiben");
+    ok(r.status === 200 && r.commits.length === 1, "D-F2 volle Datei mit hero.title=null -> Datei blockiert, Rest live");
+    ok(r.draftsLeft === 0 && r.codeLeft === 1, "D-F2 Feldentwurf weg, Voll-Entwurf bleibt");
+    ok(JSON.parse(r.repo.get("src/content/pages/preise.json")).preis.betrag === 12, "D-F2 gültige Änderung live");
   }
   {
     // D-F3: deklariertes Zahlfeld als String "42" per voller Datei
@@ -650,6 +651,36 @@ module.exports = Object.assign({}, real, {
     });
     const banner = mirror.status === 200 ? JSON.parse(mirror.repo.get("src/content/site.json")).banner : null;
     ok(mirror.status === 200 && banner && banner.enabled === true, "C-B2c Chat-Banner gemeinsam veröffentlichbar (Boolean)");
+  }
+
+  // ---------- Teil P: Teilveröffentlichung (Mittelweg) ----------
+  {
+    // E-P1: gültig (preise) + ungültig (site.json) -> 200, Rest live, Rest bleibt
+    const r = await runScenario({
+      manifest: DEMO_MANIFEST,
+      files: DEMO_FILES(),
+      drafts: [
+        ["preis.betrag", "15"],
+        ["json:src/content/site.json:banner.variant", "party"],
+      ],
+      codeDrafts: [],
+    });
+    const betrag = r.status === 200 ? JSON.parse(r.repo.get("src/content/pages/preise.json")).preis.betrag : null;
+    ok(r.status === 200 && betrag === 15 && r.commits.length === 1, "E-P1 Teilveröffentlichung -> 200, gültige Datei live");
+    ok(r.draftsLeft === 1, "E-P1 fehlerhafter Entwurf bleibt erhalten");
+    ok(Array.isArray(r.body.publishedFieldIds) && r.body.publishedFieldIds.includes("preis.betrag"), "E-P1 publishedFieldIds nennt das live gegangene Feld");
+    ok(
+      Array.isArray(r.body.blocked) && r.body.blocked.length === 1 && r.body.blocked[0].file === "src/content/site.json",
+      "E-P1 blocked nennt Datei + Grund"
+    );
+    // E-P2: rein fehlerhafter Satz -> weiter 400 ohne Write
+    const r2 = await runScenario({
+      manifest: DEMO_MANIFEST,
+      files: DEMO_FILES(),
+      drafts: [["json:src/content/site.json:banner.variant", "party"]],
+      codeDrafts: [],
+    });
+    ok(r2.status === 400 && r2.commits.length === 0 && r2.draftsLeft === 1, "E-P2 rein fehlerhaft -> 400 ohne Write, Entwurf bleibt");
   }
 
   // ---------- Teil E: Restlücken nach 29f6da5 ----------

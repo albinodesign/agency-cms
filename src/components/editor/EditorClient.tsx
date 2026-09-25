@@ -336,7 +336,13 @@ export function EditorClient({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ siteId: site.id }),
       });
-      const body = (await res.json()) as { error?: string; message?: string; commitSha?: string | null };
+      const body = (await res.json()) as {
+        error?: string;
+        message?: string;
+        commitSha?: string | null;
+        publishedFieldIds?: string[];
+        blocked?: Array<{ file: string; errors: string[] }>;
+      };
 
       if (!res.ok) {
         setDeployState("idle");
@@ -344,16 +350,32 @@ export function EditorClient({
         return;
       }
 
-      setDirtyFields(new Set());
+      // Teilveröffentlichung: Nur bestätigte Felder gelten als live, der Rest
+      // bleibt als Entwurf erhalten (dirty) und wird namentlich genannt.
+      const published = new Set(body.publishedFieldIds ?? [...dirtyFields]);
+      setDirtyFields((prev) => new Set([...prev].filter((id) => !published.has(id))));
+      setLiveMap((prev) => {
+        const next = { ...prev };
+        for (const id of published) {
+          if (values[id] !== undefined) next[id] = values[id];
+        }
+        return next;
+      });
       setStatus("live");
-      // Live-Vergleich auf den neuen Stand setzen (Undo/Diff danach wieder korrekt)
-      setLiveMap({ ...values });
       // Verlaufs-Liste sofort neu laden lassen
       setHistoryRefresh((k) => k + 1);
       pushToast(
         "success",
         body.message ?? "Änderungen wurden übertragen. Die Website wird jetzt neu aufgebaut."
       );
+      if (body.blocked && body.blocked.length > 0) {
+        pushToast(
+          "error",
+          `Zurückgehalten (bleibt Entwurf): ${body.blocked
+            .map((b) => `${b.file}: ${b.errors[0] ?? "Fehler"}`)
+            .join(" | ")}`
+        );
+      }
 
       // Echter Aufbau-Check: alle 10 Sekunden bei GitHub nachfragen, was Vercel
       // zu dieser Version meldet (läuft / fertig / fehlgeschlagen). Nach 3 Minuten

@@ -333,7 +333,7 @@ module.exports = Object.assign({}, real, {
     ok(r.status === 200 && stored === 19.9, "R-U4 Alias-Zahl wird Zahl");
   }
 
-  // R-R1: volle home.json mit {} trotz erforderlichem Ziel
+  // R-R1: volle home.json mit {} trotz erforderlichem Ziel -> Datei blockiert, Rest live
   {
     const r = await runScenario({
       manifest: BASE_MANIFEST,
@@ -341,8 +341,9 @@ module.exports = Object.assign({}, real, {
       drafts: [["preis.betrag", "12"]],
       codeDrafts: [["src/content/pages/home.json", "{}"]],
     });
-    ok(r.status === 400 && /fehlt im neuen Stand/.test(r.body.error || ""), "R-R1 leere Voll-Datei -> 400");
-    ok(r.commits.length === 0 && r.draftsLeft === 1 && r.codeLeft === 1, "R-R1 kein Write, alle Entwürfe bleiben");
+    ok(r.status === 200 && /fehlt im neuen Stand/.test(JSON.stringify(r.body.blocked || "")), "R-R1 leere Voll-Datei -> Datei blockiert, Rest live");
+    ok(r.commits.length === 1 && r.draftsLeft === 0 && r.codeLeft === 1, "R-R1 ein Write, Feldentwurf weg, Voll-Entwurf bleibt");
+    ok(JSON.parse(r.repo.get("src/content/pages/preise.json")).preis.betrag === 12, "R-R1 gültige Änderung live");
   }
 
   // R-R2: neuer Manifest-Entwurf mit package.json-Ziel
