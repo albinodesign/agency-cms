@@ -14,6 +14,7 @@ import {
   ChevronDown,
   ChevronsDownUp,
   ChevronsUpDown,
+  Copy,
   Download,
   Eye,
   FileText,
@@ -135,6 +136,10 @@ export function EditorClient({
   const [codeDraftFiles, setCodeDraftFiles] = useState<string[]>([]);
   const [historyRefresh, setHistoryRefresh] = useState(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  // Dauerhafter Veröffentlichungs-Fehler (bleibt stehen + kopierbar, bis der
+  // nächste Versuch startet oder er geschlossen wird – Toasts verschwinden).
+  const [publishError, setPublishError] = useState<{ title: string; details: string } | null>(null);
+  const [errorCopied, setErrorCopied] = useState(false);
   const [activeTab, setActiveTab] = useState<"content" | "blog">("content");
   const [searchQuery, setSearchQuery] = useState("");
   const [activePageId, setActivePageId] = useState<string | null>(null);
@@ -328,6 +333,8 @@ export function EditorClient({
 
   async function handlePublish() {
     setPublishing(true);
+    setPublishError(null);
+    setErrorCopied(false);
     // Phase 1: Übertragen läuft (Anfrage an den Server)
     setDeployState("sending");
     try {
@@ -346,7 +353,9 @@ export function EditorClient({
 
       if (!res.ok) {
         setDeployState("idle");
-        pushToast("error", body.error ?? "Veröffentlichung fehlgeschlagen.");
+        const details = body.error ?? "Veröffentlichung fehlgeschlagen.";
+        setPublishError({ title: "Veröffentlichung fehlgeschlagen.", details });
+        pushToast("error", details);
         return;
       }
 
@@ -369,6 +378,10 @@ export function EditorClient({
         body.message ?? "Änderungen wurden übertragen. Die Website wird jetzt neu aufgebaut."
       );
       if (body.blocked && body.blocked.length > 0) {
+        const details = body.blocked
+          .map((b) => `${b.file}:\n- ${(b.errors ?? []).join("\n- ")}`)
+          .join("\n\n");
+        setPublishError({ title: "Teils veröffentlicht – zurückgehalten:", details });
         pushToast(
           "error",
           `Zurückgehalten (bleibt Entwurf): ${body.blocked
@@ -424,10 +437,32 @@ export function EditorClient({
       void poll();
     } catch {
       setDeployState("idle");
+      setPublishError({
+        title: "Server nicht erreichbar.",
+        details: "Server nicht erreichbar. Bitte später erneut versuchen.",
+      });
       pushToast("error", "Server nicht erreichbar. Bitte später erneut versuchen.");
     } finally {
       setPublishing(false);
     }
+  }
+
+  /** Fehlertext in die Zwischenablage kopieren (mit Fallback für alte Browser). */
+  async function copyPublishError() {
+    if (!publishError) return;
+    const text = `${publishError.title}\n${publishError.details}`;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const area = document.createElement("textarea");
+      area.value = text;
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand("copy");
+      document.body.removeChild(area);
+    }
+    setErrorCopied(true);
+    window.setTimeout(() => setErrorCopied(false), 2000);
   }
 
   // Alle Felder flach für den KI-Chat (Kontext + Übernahme)
@@ -700,6 +735,39 @@ export function EditorClient({
           </button>
         </div>
       </header>
+
+      {/* Dauerhafte Fehlerbox: bleibt stehen + kopierbar (Toasts verschwinden) */}
+      {publishError && (
+        <div className="border-b border-red-200 bg-red-50 px-6 py-3">
+          <div className="mx-auto flex max-w-6xl items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-red-800">{publishError.title}</p>
+              <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-red-200 bg-white px-3 py-2 font-mono text-xs text-red-900">
+                {publishError.details}
+              </pre>
+              <div className="mt-2 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => void copyPublishError()}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-medium text-red-700 transition hover:bg-red-100"
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                  {errorCopied ? "Kopiert ✓" : "Fehler kopieren"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPublishError(null)}
+                  className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-red-600 transition hover:bg-red-100"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  Schließen
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Handy-Umschalter: Bearbeiten <-> Vorschau (am PC immer beides nebeneinander) */}
       <div className="flex gap-1 border-b border-zinc-200 bg-white p-2 lg:hidden">
