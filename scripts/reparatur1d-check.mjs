@@ -655,6 +655,39 @@ module.exports = Object.assign({}, real, {
 
   // ---------- Teil P: Teilveröffentlichung (Mittelweg) ----------
   {
+    // E-P0: Bildpfade – schlichte Dateinamen und relative Pfade sind ok,
+    // Tricks (Schema, Traversal, fremder Host) bleiben blockiert.
+    const imgManifest = {
+      sections: [
+        {
+          id: "bilder",
+          title: "Bilder",
+          fields: [
+            { id: "site.logo", label: "Logo", type: "image", file: "src/content/site.json", path: "logo" },
+          ],
+        },
+      ],
+    };
+    const imgFiles = () => ({
+      "src/content/site.json": JSON.stringify({ titel: "Firma", logo: "alt.png" }),
+    });
+    const imgRun = (wert) =>
+      runScenario({
+        manifest: imgManifest,
+        files: imgFiles(),
+        drafts: [["site.logo", wert]],
+        codeDrafts: [],
+      });
+    const ok1 = await imgRun("logoneu.png");
+    ok(ok1.status === 200 && JSON.parse(ok1.repo.get("src/content/site.json")).logo === "logoneu.png", "E-P0a schlichter Bildname -> 200");
+    const ok2 = await imgRun("bilder/foto.jpg?v=2");
+    ok(ok2.status === 200, "E-P0b relativer Pfad mit Parameter -> 200");
+    const bad1 = await imgRun("javascript:alert(1)");
+    ok(bad1.status === 400 && bad1.commits.length === 0, "E-P0c javascript-URL -> 400 ohne Write");
+    const bad2 = await imgRun("../geheim.txt");
+    ok(bad2.status === 400 && bad2.commits.length === 0, "E-P0d Traversal-Pfad -> 400 ohne Write");
+    const bad3 = await imgRun("//fremd.de/x.png");
+    ok(bad3.status === 400 && bad3.commits.length === 0, "E-P0e fremder Host -> 400 ohne Write");
     // E-P1: gültig (preise) + ungültig (site.json) -> 200, Rest live, Rest bleibt
     const r = await runScenario({
       manifest: DEMO_MANIFEST,

@@ -2,6 +2,21 @@ import type { FieldType } from "@/types/cms";
 
 const NUM_RE = /^[-+]?\d+([.,]\d+)?$/;
 
+/**
+ * Sichere relative Verweise ohne Schema, z. B. "logo.png" oder
+ * "bilder/foto.jpg?v=2". Abgewiesen werden Leerzeichen, Quotes, Klammern,
+ * Backslashes, ".." (Pfad-Tricks), "//…" (fremder Host) und URIs mit Schema
+ * wie javascript: oder data: (Skript-/Einbettungsgefahr).
+ */
+function isSafeRelativeRef(trimmed: string): boolean {
+  if (trimmed === "" || /\s/.test(trimmed)) return false;
+  if (/["'<>\\]/.test(trimmed)) return false;
+  if (trimmed.includes("..")) return false;
+  if (trimmed.startsWith("//")) return false;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)) return false;
+  return true;
+}
+
 /** Beschreibt einen gefundenen Nicht-String-Wert für Fehlermeldungen. */
 function kindOf(value: unknown): string {
   if (Array.isArray(value)) return "Liste";
@@ -65,12 +80,13 @@ export function validateJsonValue(
       try {
         const url = new URL(trimmed);
         if (url.protocol !== "http:" && url.protocol !== "https:") {
-          return `"${value}" muss mit http:// oder https:// beginnen (oder als Bild aus der Galerie hochgeladen werden).`;
+          return `"${value}" muss mit http:// oder https:// beginnen (oder ein sicherer relativer Pfad sein).`;
         }
       } catch {
-        // Relative Pfade wie "/bilder/foto.jpg" gelten lassen
-        if (!trimmed.startsWith("/")) {
-          return `"${value}" ist keine gültige Internetadresse.`;
+        // Relative Pfade wie "/bilder/foto.jpg" oder schlichte Dateinamen wie
+        // "logo.png" gelten lassen, solange sie keine Tricks enthalten.
+        if (!isSafeRelativeRef(trimmed)) {
+          return `"${value}" ist keine gültige Internetadresse (erlaubt: http(s)-Adresse oder sicherer relativer Pfad).`;
         }
       }
       return null;

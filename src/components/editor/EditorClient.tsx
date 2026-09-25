@@ -354,8 +354,9 @@ export function EditorClient({
       if (!res.ok) {
         setDeployState("idle");
         const details = body.error ?? "Veröffentlichung fehlgeschlagen.";
+        // Kein Toast unten rechts mehr – die dauerhafte Box oben zeigt den
+        // Fehler in Ruhe (inkl. Kopieren-Button).
         setPublishError({ title: "Veröffentlichung fehlgeschlagen.", details });
-        pushToast("error", details);
         return;
       }
 
@@ -382,12 +383,6 @@ export function EditorClient({
           .map((b) => `${b.file}:\n- ${(b.errors ?? []).join("\n- ")}`)
           .join("\n\n");
         setPublishError({ title: "Teils veröffentlicht – zurückgehalten:", details });
-        pushToast(
-          "error",
-          `Zurückgehalten (bleibt Entwurf): ${body.blocked
-            .map((b) => `${b.file}: ${b.errors[0] ?? "Fehler"}`)
-            .join(" | ")}`
-        );
       }
 
       // Echter Aufbau-Check: alle 10 Sekunden bei GitHub nachfragen, was Vercel
@@ -441,7 +436,6 @@ export function EditorClient({
         title: "Server nicht erreichbar.",
         details: "Server nicht erreichbar. Bitte später erneut versuchen.",
       });
-      pushToast("error", "Server nicht erreichbar. Bitte später erneut versuchen.");
     } finally {
       setPublishing(false);
     }
@@ -743,7 +737,7 @@ export function EditorClient({
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
             <div className="min-w-0 flex-1">
               <p className="text-sm font-semibold text-red-800">{publishError.title}</p>
-              <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-red-200 bg-white px-3 py-2 font-mono text-xs text-red-900">
+              <pre className="mt-1 max-h-96 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-red-200 bg-white px-3 py-2 font-mono text-xs text-red-900">
                 {publishError.details}
               </pre>
               <div className="mt-2 flex gap-2">
