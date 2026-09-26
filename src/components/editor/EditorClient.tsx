@@ -2,11 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { ImageField } from "@/components/editor/ImageField";
 import { HistoryDrawer } from "@/components/editor/HistoryDrawer";
 import { ChatDrawer } from "@/components/editor/ChatDrawer";
 import { BlogPanel } from "@/components/editor/BlogPanel";
+import { StatusBadge } from "@/components/editor/StatusBadge";
+import type { SaveStatus } from "@/components/editor/StatusBadge";
+import { BannerCard } from "@/components/editor/BannerCard";
+import { FieldEditor } from "@/components/editor/FieldEditor";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -16,14 +20,12 @@ import {
   ChevronsUpDown,
   Copy,
   Download,
-  Eye,
   FileText,
   History,
   Loader2,
   Monitor,
   Newspaper,
   Rocket,
-  RotateCcw,
   Search,
   Smartphone,
   Sparkles,
@@ -37,13 +39,14 @@ import type {
   Site,
 } from "@/types/cms";
 
-type SaveStatus = "live" | "saving" | "saved";
 type Viewport = "desktop" | "mobile";
 
 interface EditorClientProps {
   site: Site;
   manifest: CmsManifest | null;
   manifestError: string | null;
+  /** W16: Stille Manifest-Deutungen (steht sonst nirgends) */
+  manifestWarnings?: string[];
   contentWarning: string | null;
   /** Live-Werte aus GitHub, bereits mit Drafts gemergt */
   initialValues: DraftMap;
@@ -77,8 +80,35 @@ const PAGE_KEYWORDS: [RegExp, string][] = [
   [/site|global|firma|footer|header|settings/i, "Firmendaten"],
 ];
 
-/** Ermittelt die Seite einer Sektion: erst ID/Titel, sonst Dateipfad der Felder. */
+/** Nur http(s)-Vorschau-Adressen sind erlaubt – niemals javascript:, data: o. ä. */
+function isSafePreviewUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return false;
+    if (url.protocol === "http:") {
+      const host = url.hostname;
+      if (host !== "localhost" && host !== "127.0.0.1") return false;
+    }
+    return url.hostname !== "";
+  } catch {
+    return false;
+  }
+}
+
+/** Feld-IDs aus der Vorschau: Zeichenbegrenzung gegen Selektor-Injection. */
+function isSafeFieldId(fieldId: string): boolean {
+  return (
+    fieldId.length >= 1 &&
+    fieldId.length <= 200 &&
+    !/[<>"'`\s]/.test(fieldId)
+  );
+}
+
+/** Ermittelt die Seite einer Sektion (N3): erst Manifest-`page`, dann
+ * Schlüsselwort-Heuristik über ID/Titel, sonst Dateipfad der Felder. */
 function detectPageLabel(section: ManifestSection): string {
+  const gepflegt = section.page?.trim();
+  if (gepflegt) return gepflegt;
   const haystack = `${section.id} ${section.title}`;
   for (const [pattern, label] of PAGE_KEYWORDS) {
     if (pattern.test(haystack)) return label;
@@ -99,6 +129,7 @@ export function EditorClient({
   site,
   manifest,
   manifestError,
+  manifestWarnings = [],
   contentWarning,
   initialValues,
   liveValues: initialLiveValues,
@@ -107,15 +138,26 @@ export function EditorClient({
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const timersRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const pendingRef = useRef(0);
+  // Noch ungespeicherte Tipp-Stände je Feld (für garantierten Flush vor Publish)
+  const pendingValuesRef = useRef<Map<string, string>>(new Map());
+  // W11: Vorschau-Nachrichten bündeln – höchstens ein Schwung pro Frame,
+  // damit schnelles Tippen das Iframe nicht flutet (fühlt sich gleich an).
+  const previewQueueRef = useRef<Map<string, string>>(new Map());
+  const previewRafRef = useRef<number | null>(null);
+
+  // Vorschau-Adresse hart geprüft: Nur http(s) – bei ungültiger Adresse ist
+  // die Vorschau deaktiviert (statt Nachrichten von allen Origins anzunehmen).
+  const previewUrlSafe = useMemo(() => isSafePreviewUrl(site.preview_url), [site.preview_url]);
 
   // Konkreter Origin der Vorschau-Website für postMessage (statt "*")
   const previewOrigin = useMemo(() => {
+    if (!previewUrlSafe) return null;
     try {
       return new URL(site.preview_url).origin;
     } catch {
       return null;
     }
-  }, [site.preview_url]);
+  }, [site.preview_url, previewUrlSafe]);
 
   const [values, setValues] = useState<DraftMap>(initialValues);
   // Reine Live-Werte (ohne Drafts) – Vergleichsbasis für Undo + Diff.
@@ -129,6 +171,8 @@ export function EditorClient({
   );
   const [viewport, setViewport] = useState<Viewport>("desktop");
   const [publishing, setPublishing] = useState(false);
+  // true, während noch ungespeicherte Tipp-Stände geschrieben werden (B4-Flush)
+  const [flushing, setFlushing] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [backupLoading, setBackupLoading] = useState(false);
@@ -144,6 +188,8 @@ export function EditorClient({
   const [searchQuery, setSearchQuery] = useState("");
   const [activePageId, setActivePageId] = useState<string | null>(null);
   const [deployState, setDeployState] = useState<DeployState>("idle");
+  // N4: Zähler für den Aufbau-Fortschritt (Prüfung n/18)
+  const [deployTries, setDeployTries] = useState(0);
   // Handy-Ansicht: zwischen Formular und Vorschau umschalten (am PC immer Split-Screen)
   const [mobileView, setMobileView] = useState<"form" | "preview">("form");
   // Klick-Modus: true = Klick in der Vorschau sucht das Feld ("Finden"),
@@ -154,6 +200,76 @@ export function EditorClient({
   const selectFlashRef = useRef<number | null>(null);
   // Echte Aufbau-Abfrage nach dem Veröffentlichen (wird beim Verlassen gestoppt)
   const deployPollRef = useRef<number | null>(null);
+  // W11: Vorschau-Update einreihen (ein Schwung pro Animationsframe)
+  const queuePreviewUpdate = useCallback(
+    (fieldId: string, value: string) => {
+      if (!previewOrigin) return;
+      previewQueueRef.current.set(fieldId, value);
+      if (previewRafRef.current !== null) return;
+      previewRafRef.current = window.requestAnimationFrame(() => {
+        previewRafRef.current = null;
+        const frame = iframeRef.current?.contentWindow;
+        if (!frame) {
+          previewQueueRef.current.clear();
+          return;
+        }
+        for (const [fid, val] of previewQueueRef.current) {
+          frame.postMessage({ type: "CMS_FIELD_UPDATE", field: fid, value: val }, previewOrigin);
+        }
+        previewQueueRef.current.clear();
+      });
+    },
+    [previewOrigin]
+  );
+  // W8: Parallele Tabs – neuester bekannter Entwurfs-Stempel + Warnung bei Fremdänderung
+  const draftsBaselineRef = useRef<string | null>(null);
+  const [externalChange, setExternalChange] = useState(false);
+  // W6: Nach Wiederherstellung frische Serverdaten laden + Formular weich zurücksetzen
+  const [pendingRestore, setPendingRestore] = useState(false);
+  const router = useRouter();
+
+  // Neueste Entwurfs-Änderung dieser Site lesen (für W8-Vergleich)
+  const readLatestDraftStamp = useCallback(async (): Promise<string | null> => {
+    try {
+      const supabase = createClient();
+      const { data } = await supabase
+        .from("drafts")
+        .select("updated_at")
+        .eq("site_id", site.id)
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const stamp = (data as { updated_at?: string } | null)?.updated_at;
+      return typeof stamp === "string" ? stamp : null;
+    } catch {
+      return null;
+    }
+  }, [site.id]);
+
+  // W8: Basis-Stempel beim Öffnen merken, danach alle 20 s prüfen, ob ein
+  // anderes Fenster/Tab Entwürfe gespeichert hat (eigene In-Flights ausblenden).
+  useEffect(() => {
+    let stopped = false;
+    void readLatestDraftStamp().then((stamp) => {
+      if (!stopped) draftsBaselineRef.current = stamp;
+    });
+    const timer = window.setInterval(async () => {
+      if (stopped || document.hidden) return;
+      if (pendingRef.current > 0 || timersRef.current.size > 0) return;
+      const stamp = await readLatestDraftStamp();
+      if (stopped || !stamp) return;
+      if (draftsBaselineRef.current !== null && stamp > draftsBaselineRef.current) {
+        draftsBaselineRef.current = stamp;
+        setExternalChange(true);
+      } else if (draftsBaselineRef.current === null) {
+        draftsBaselineRef.current = stamp;
+      }
+    }, 20_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [readLatestDraftStamp]);
 
   // Blog-Feature aktiviert? (features.blog === true oder features.blog.enabled === true)
   const blogEnabled = useMemo(() => {
@@ -185,24 +301,34 @@ export function EditorClient({
     () => new Set(sections[0] ? [sections[0].id] : [])
   );
 
-  // Suche: Sektionen/Felder filtern (Label, Key oder Sektions-Titel)
+  // Suche (N3): Label, ID, Sektions-Titel/-Seite, Dateipfad UND aktuelle Werte.
   const filteredSections = useMemo<ManifestSection[]>(() => {
     const query = searchQuery.trim().toLowerCase();
     if (!query) return sections;
     return sections
       .map((section) => {
-        const sectionMatches = section.title.toLowerCase().includes(query);
+        const sectionMatches =
+          section.title.toLowerCase().includes(query) ||
+          (section.page ?? "").toLowerCase().includes(query);
         const fields = sectionMatches
           ? section.fields
           : (section.fields ?? []).filter(
               (f) =>
                 f.label.toLowerCase().includes(query) ||
-                f.id.toLowerCase().includes(query)
+                f.id.toLowerCase().includes(query) ||
+                f.file.toLowerCase().includes(query) ||
+                (values[f.id] ?? "").toLowerCase().includes(query)
             );
         return { ...section, fields };
       })
       .filter((s) => s.fields.length > 0);
-  }, [sections, searchQuery]);
+  }, [sections, searchQuery, values]);
+
+  // Trefferzahl für die Suche (N3)
+  const trefferZahl = useMemo(
+    () => filteredSections.reduce((sum, s) => sum + (s.fields?.length ?? 0), 0),
+    [filteredSections]
+  );
 
   // Sektionen nach Seiten gruppieren (Startseite, Leistungen, Kontakt, Firmendaten …)
   const pages = useMemo<PageGroup[]>(() => {
@@ -260,10 +386,45 @@ export function EditorClient({
     [pushToast]
   );
 
+  // W6: Wiederherstellung ohne Reload – Serverdaten neu laden, dann das
+  // Formular auf den frischen Stand setzen (Werte, Live-Vergleich, Drafts,
+  // Vorschau). Laufende Autosave-Timer werden verworfen, damit keine alten
+  // Tipp-Stände zurückgerollte Entwürfe wiederauferstehen lassen.
+  const handleRestored = useCallback(
+    (message: string) => {
+      pushToast("success", message);
+      setHistoryRefresh((k) => k + 1);
+      setPendingRestore(true);
+      router.refresh();
+    },
+    [pushToast, router]
+  );
+
+  useEffect(() => {
+    if (!pendingRestore) return;
+    for (const timer of timersRef.current.values()) window.clearTimeout(timer);
+    timersRef.current.clear();
+    pendingValuesRef.current.clear();
+    setValues(initialValues);
+    setLiveMap(initialLiveValues);
+    setDirtyFields(new Set(draftFields));
+    setStatus(draftFields.length > 0 ? "saved" : "live");
+    setPublishError(null);
+    setExternalChange(false);
+    if (previewUrlSafe && iframeRef.current) {
+      iframeRef.current.src = site.preview_url;
+    }
+    void readLatestDraftStamp().then((stamp) => {
+      draftsBaselineRef.current = stamp;
+    });
+    setPendingRestore(false);
+  }, [pendingRestore, initialValues, initialLiveValues, draftFields, previewUrlSafe, site.preview_url, readLatestDraftStamp]);
+
   useEffect(() => {
     const timers = timersRef.current;
     return () => {
       timers.forEach((t) => clearTimeout(t));
+      if (previewRafRef.current !== null) window.cancelAnimationFrame(previewRafRef.current);
       if (selectFlashRef.current) window.clearTimeout(selectFlashRef.current);
       if (deployPollRef.current) window.clearInterval(deployPollRef.current);
     };
@@ -279,7 +440,7 @@ export function EditorClient({
   }, []);
 
   const saveDraft = useCallback(
-    async (fieldId: string, value: string) => {
+    async (fieldId: string, value: string): Promise<boolean> => {
       pendingRef.current += 1;
       setStatus("saving");
       try {
@@ -290,9 +451,16 @@ export function EditorClient({
         );
         if (error) {
           pushToast("error", `Entwurf konnte nicht gespeichert werden: ${error.message}`);
+          return false;
         }
+        // W8: Eigene Speicherung als Basis merken (kein Fremd-Alarm dafür)
+        void readLatestDraftStamp().then((stamp) => {
+          if (stamp) draftsBaselineRef.current = stamp;
+        });
+        return true;
       } catch {
         pushToast("error", "Supabase ist nicht erreichbar. Änderung wurde nicht gespeichert.");
+        return false;
       } finally {
         pendingRef.current = Math.max(0, pendingRef.current - 1);
         if (pendingRef.current === 0) {
@@ -300,21 +468,18 @@ export function EditorClient({
         }
       }
     },
-    [site.id, pushToast]
+    [site.id, pushToast, readLatestDraftStamp]
   );
 
   const handleChange = useCallback(
     (fieldId: string, value: string) => {
       setValues((prev) => ({ ...prev, [fieldId]: value }));
       setDirtyFields((prev) => new Set(prev).add(fieldId));
+      // Noch ungespeicherten Stand merken (für garantierten Flush vor Publish)
+      pendingValuesRef.current.set(fieldId, value);
 
-      // a) Sofortiges Live-Update an die Vorschau (nur an den konkreten Origin)
-      if (previewOrigin) {
-        iframeRef.current?.contentWindow?.postMessage(
-          { type: "CMS_FIELD_UPDATE", field: fieldId, value },
-          previewOrigin
-        );
-      }
+      // a) Sofortiges Live-Update an die Vorschau (gebündelt pro Frame, W11)
+      queuePreviewUpdate(fieldId, value);
 
       // b) Debounced Autosave (800ms)
       const existing = timersRef.current.get(fieldId);
@@ -324,17 +489,51 @@ export function EditorClient({
         fieldId,
         setTimeout(() => {
           timersRef.current.delete(fieldId);
+          pendingValuesRef.current.delete(fieldId);
           void saveDraft(fieldId, value);
         }, 800)
       );
     },
-    [saveDraft, previewOrigin]
+    [saveDraft, queuePreviewUpdate]
   );
+
+  // Schreibt alle noch wartenden Tipp-Stände sofort (statt erst nach 800 ms).
+  // Wird vor jedem Publish aufgerufen – so geht keine sichtbare Änderung verloren.
+  const flushPendingDrafts = useCallback(async (): Promise<boolean> => {
+    const pending: Array<[string, string]> = [];
+    for (const [fieldId, timer] of timersRef.current) {
+      window.clearTimeout(timer);
+      const value = pendingValuesRef.current.get(fieldId);
+      if (value !== undefined) pending.push([fieldId, value]);
+    }
+    timersRef.current.clear();
+    pendingValuesRef.current.clear();
+    if (pending.length === 0) return true;
+    const results = await Promise.all(pending.map(([fieldId, value]) => saveDraft(fieldId, value)));
+    return results.every(Boolean);
+  }, [saveDraft]);
 
   async function handlePublish() {
     setPublishing(true);
     setPublishError(null);
     setErrorCopied(false);
+    // B4: Erst alle noch wartenden Tipp-Stände speichern – sonst ginge die
+    // letzte Eingabe (< 800 ms alt) beim sofortigen Publish verloren.
+    if (timersRef.current.size > 0) {
+      setFlushing(true);
+      const flushed = await flushPendingDrafts();
+      setFlushing(false);
+      if (!flushed) {
+        setPublishing(false);
+        setDeployState("idle");
+        setPublishError({
+          title: "Noch nicht gespeichert.",
+          details:
+            "Mindestens eine Änderung konnte gerade nicht als Entwurf gespeichert werden (siehe Meldung unten rechts). Bitte kurz warten und erneut auf „Veröffentlichen“ klicken – es ging nichts verloren.",
+        });
+        return;
+      }
+    }
     // Phase 1: Übertragen läuft (Anfrage an den Server)
     setDeployState("sending");
     try {
@@ -348,7 +547,10 @@ export function EditorClient({
         message?: string;
         commitSha?: string | null;
         publishedFieldIds?: string[];
+        publishedFiles?: string[];
         blocked?: Array<{ file: string; errors: string[] }>;
+        failed?: Array<{ file: string; error: string }>;
+        partial?: boolean;
       };
 
       if (!res.ok) {
@@ -374,15 +576,40 @@ export function EditorClient({
       setStatus("live");
       // Verlaufs-Liste sofort neu laden lassen
       setHistoryRefresh((k) => k + 1);
-      pushToast(
-        "success",
-        body.message ?? "Änderungen wurden übertragen. Die Website wird jetzt neu aufgebaut."
-      );
+      // B5: Teil-Erfolg ehrlich zeigen – kein stiller „Erfolg", wenn Dateien
+      // zurückgehalten wurden oder Commits fehlschlugen.
+      const blockedCount = body.blocked?.length ?? 0;
+      const failedCount = body.failed?.length ?? 0;
+      const isPartial = body.partial === true || blockedCount > 0 || failedCount > 0;
+      if (!isPartial) {
+        pushToast(
+          "success",
+          body.message ?? "Änderungen wurden übertragen. Die Website wird jetzt neu aufgebaut."
+        );
+      } else {
+        pushToast(
+          "error",
+          `Teils veröffentlicht (${(body.publishedFiles ?? []).length} Datei(en) live, ${blockedCount + failedCount} zurückgehalten) – Details stehen oben in der Box.`
+        );
+      }
+      const heldBack: string[] = [];
       if (body.blocked && body.blocked.length > 0) {
-        const details = body.blocked
-          .map((b) => `${b.file}:\n- ${(b.errors ?? []).join("\n- ")}`)
-          .join("\n\n");
-        setPublishError({ title: "Teils veröffentlicht – zurückgehalten:", details });
+        heldBack.push(
+          body.blocked
+            .map((b) => `${b.file}:\n- ${(b.errors ?? []).join("\n- ")}`)
+            .join("\n\n")
+        );
+      }
+      if (body.failed && body.failed.length > 0) {
+        heldBack.push(
+          body.failed.map((f) => `${f.file}:\n- ${f.error}`).join("\n\n")
+        );
+      }
+      if (heldBack.length > 0) {
+        setPublishError({
+          title: isPartial ? "Teils veröffentlicht – zurückgehalten:" : "Zurückgehalten:",
+          details: heldBack.join("\n\n"),
+        });
       }
 
       // Echter Aufbau-Check: alle 10 Sekunden bei GitHub nachfragen, was Vercel
@@ -394,10 +621,12 @@ export function EditorClient({
         return;
       }
       setDeployState("building");
+      setDeployTries(0);
       const sha = body.commitSha;
       let tries = 0;
       const poll = async () => {
         tries += 1;
+        setDeployTries(tries);
         try {
           const statusRes = await fetch(
             `/api/site/${site.id}/deploy-status?sha=${encodeURIComponent(sha)}`
@@ -491,10 +720,14 @@ export function EditorClient({
 
   const hasDrafts = dirtyFields.size > 0;
 
-  /** Öffnet die echte Live-Website in einem neuen Tab. */
+  /** Öffnet die echte Live-Website in einem neuen Tab (nur sichere Adressen). */
   const openLiveSite = useCallback(() => {
+    if (!previewUrlSafe) {
+      pushToast("error", "Die Vorschau-Adresse ist ungültig und wird nicht geöffnet.");
+      return;
+    }
     window.open(site.preview_url, "_blank", "noopener");
-  }, [site.preview_url]);
+  }, [site.preview_url, previewUrlSafe, pushToast]);
 
   /** Markiert einen KI-Entwurf als ungespeichert (Badge oben), ohne ins Formular zu schreiben. */
   const touchDraft = useCallback((fieldId: string) => {
@@ -517,7 +750,10 @@ export function EditorClient({
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${site.repo_name}-backup.zip`;
+      const safeDownloadName =
+        site.repo_name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^[-.]+/, "").slice(0, 100) ||
+        "website";
+      a.download = `${safeDownloadName}-backup.zip`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -541,12 +777,7 @@ export function EditorClient({
         return next;
       });
       // Vorschau springt sofort auf den Live-Stand zurück
-      if (previewOrigin) {
-        iframeRef.current?.contentWindow?.postMessage(
-          { type: "CMS_FIELD_UPDATE", field: fieldId, value: liveValue },
-          previewOrigin
-        );
-      }
+      queuePreviewUpdate(fieldId, liveValue);
       try {
         const supabase = createClient();
         await supabase.from("drafts").delete().eq("site_id", site.id).eq("field_id", fieldId);
@@ -554,7 +785,7 @@ export function EditorClient({
         pushToast("error", "Entwurf konnte nicht aus der Datenbank gelöscht werden – bitte Seite neu laden.");
       }
     },
-    [liveMap, previewOrigin, site.id, pushToast]
+    [liveMap, queuePreviewUpdate, site.id, pushToast]
   );
 
   /** Öffnet den Diff-Inspektor und lädt zusätzlich offene Datei-Entwürfe. */
@@ -562,15 +793,21 @@ export function EditorClient({
     setDiffOpen(true);
     try {
       const supabase = createClient();
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("code_drafts")
         .select("file_path")
         .eq("site_id", site.id);
+      if (error) {
+        pushToast("error", "Datei-Entwürfe konnten nicht geladen werden – die Liste ist ggf. unvollständig.");
+        setCodeDraftFiles([]);
+        return;
+      }
       setCodeDraftFiles(((data ?? []) as Array<{ file_path: string }>).map((r) => r.file_path));
     } catch {
+      pushToast("error", "Datei-Entwürfe konnten nicht geladen werden – die Liste ist ggf. unvollständig.");
       setCodeDraftFiles([]);
     }
-  }, [site.id]);
+  }, [site.id, pushToast]);
 
   // KI-Entwürfe wurden serverseitig bereits in drafts geupsertet.
   // Hier nur lokalen State & Live-Iframe aktualisieren (kein erneuter DB-Timer!).
@@ -580,14 +817,9 @@ export function EditorClient({
       setDirtyFields((prev) => new Set(prev).add(fieldId));
       setStatus("saved");
 
-      if (previewOrigin) {
-        iframeRef.current?.contentWindow?.postMessage(
-          { type: "CMS_FIELD_UPDATE", field: fieldId, value },
-          previewOrigin
-        );
-      }
+      queuePreviewUpdate(fieldId, value);
     },
-    [previewOrigin]
+    [queuePreviewUpdate]
   );
 
   /** Meldet der Vorschau ob Klicks Felder suchen (Finden) oder normal funktionieren (Surfen). */
@@ -614,13 +846,20 @@ export function EditorClient({
   // Hört auf Klicks aus der Vorschau: Die Website schickt CMS_FIELD_SELECT
   // mit der Feld-ID, das CMS springt dann zum passenden Formularfeld.
   useEffect(() => {
+    // B3: Bei ungültiger Vorschau-Adresse ist der Empfang deaktiviert – sonst
+    // würde der Check unten („alle Origins erlauben") fremde Websites durchlassen.
+    if (!previewOrigin) return;
     function onPreviewMessage(event: MessageEvent) {
-      // Sicherheitscheck: nur Nachrichten aus der eigenen Vorschau annehmen
-      if (previewOrigin && event.origin !== previewOrigin) return;
+      // Sicherheitscheck: nur Nachrichten aus der eigenen Vorschau annehmen –
+      // erwarteter Origin UND erwartetes Fenster (das eingebettete Iframe).
+      if (event.origin !== previewOrigin) return;
+      if (event.source !== iframeRef.current?.contentWindow) return;
       const data = event.data as { type?: unknown; field?: unknown } | null;
       if (!data || data.type !== "CMS_FIELD_SELECT" || typeof data.field !== "string") {
         return;
       }
+      // Feld-ID vor der Verarbeitung validieren (Selektor-Injection abwehren)
+      if (!isSafeFieldId(data.field)) return;
       const fieldId = data.field;
 
       // Feld im Manifest suchen (Seite + Sektion merken)
@@ -705,7 +944,7 @@ export function EditorClient({
           <button
             onClick={() => void handleBackup()}
             disabled={backupLoading}
-            title="Deine Website gehört dir: Lade sie jederzeit als .zip herunter und nimm sie mit, wohin du willst – keine Bindung, kein Lock-in."
+            title="Deine Website gehört dir: Lade sie als .zip herunter (reine Kopie). Zum Wiederherstellen älterer Stände dient der Verlauf – aus der .zip wird nichts zurückgespielt."
             className="flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-60"
           >
             {backupLoading ? (
@@ -725,7 +964,7 @@ export function EditorClient({
             ) : (
               <Rocket className="h-4 w-4" />
             )}
-            {publishing ? "Veröffentlichen …" : "Veröffentlichen"}
+            {flushing ? "Speichern …" : publishing ? "Veröffentlichen …" : "Veröffentlichen"}
           </button>
         </div>
       </header>
@@ -759,6 +998,34 @@ export function EditorClient({
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* W8: Hinweis bei Änderungen aus anderem Tab/Fenster (kein stiller Verlust) */}
+      {externalChange && (
+        <div className="border-b border-amber-200 bg-amber-50 px-6 py-3">
+          <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
+            <p className="min-w-0 flex-1 text-sm text-amber-900">
+              <span className="font-semibold">In einem anderen Fenster wurde gespeichert.</span>{" "}
+              Deine Ansicht ist möglicherweise veraltet – neu laden übernimmt den fremden Stand
+              (eigene ungespeicherte Eingaben dabei zuerst veröffentlichen oder kopieren).
+            </p>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-amber-500"
+            >
+              Neu laden
+            </button>
+            <button
+              type="button"
+              onClick={() => setExternalChange(false)}
+              className="rounded-lg px-3 py-1.5 text-xs font-medium text-amber-700 transition hover:bg-amber-100"
+            >
+              Ignorieren
+            </button>
           </div>
         </div>
       )}
@@ -800,7 +1067,7 @@ export function EditorClient({
           <div className="mx-auto max-w-xl px-6 py-6">
             {deployState !== "idle" && (
               <div
-                className={`mb-6 rounded-xl border px-4 py-3 text-sm ${
+                className={`sticky top-0 z-10 mb-6 rounded-xl border px-4 py-3 text-sm shadow-sm ${
                   deployState === "sending"
                     ? "border-amber-200 bg-amber-50 text-amber-800"
                     : deployState === "building" || deployState === "slow"
@@ -827,8 +1094,20 @@ export function EditorClient({
                       </p>
                       <p className="mt-1 text-blue-700/80">
                         Ich prüfe den echten Stand und melde mich, sobald alles
-                        live ist – du musst nichts tun.
+                        live ist – du musst nichts tun. (Prüfung {Math.min(deployTries, 18)}/18)
                       </p>
+                      <div
+                        className="mt-2 h-1.5 overflow-hidden rounded-full bg-blue-200/70"
+                        role="progressbar"
+                        aria-valuemin={0}
+                        aria-valuemax={18}
+                        aria-valuenow={Math.min(deployTries, 18)}
+                      >
+                        <div
+                          className="h-full rounded-full bg-blue-600 transition-all"
+                          style={{ width: `${Math.min(100, (deployTries / 18) * 100)}%` }}
+                        />
+                      </div>
                     </div>
                     <button
                       onClick={() => setDeployState("idle")}
@@ -942,6 +1221,29 @@ export function EditorClient({
               </div>
             )}
 
+            {/* W16: Stille Manifest-Deutungen – Tippfehler der Website fallen auf */}
+            {!manifestError && manifestWarnings.length > 0 && (
+              <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <div className="min-w-0">
+                    <p className="font-semibold">
+                      Feldliste mit {manifestWarnings.length} Hinweis{manifestWarnings.length === 1 ? "" : "en"} geladen
+                    </p>
+                    <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                      {manifestWarnings.slice(0, 5).map((h, i) => (
+                        <li key={i} className="break-words">{h}</li>
+                      ))}
+                      {manifestWarnings.length > 5 && (
+                        <li>+ {manifestWarnings.length - 5} weitere … (Details stehen im Website-Repo in src/content/cms.manifest.json)</li>
+                      )}
+                    </ul>
+                    <p className="mt-1">Bitte die Agentur bitten, die Feldliste zu prüfen – es wurde nichts gelöscht, nur gedeutet.</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Tabs: nur wenn das Blog-Feature im Manifest aktiviert ist */}
             {blogEnabled && !manifestError && (
               <div className="mb-6 flex rounded-xl border border-zinc-200 bg-zinc-100 p-1">
@@ -989,10 +1291,15 @@ export function EditorClient({
                         type="text"
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        placeholder="Feld suchen …"
+                        placeholder="Feld suchen … (Name, Datei oder Inhalt)"
                         className="w-full rounded-lg border border-zinc-300 bg-white py-2 pl-9 pr-3 text-sm outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10"
                       />
                     </div>
+                    {isSearching && (
+                      <p className="text-xs text-zinc-500" role="status">
+                        {trefferZahl === 0 ? "Keine Treffer." : `${trefferZahl} Treffer`}
+                      </p>
+                    )}
                     <div className="flex justify-end gap-2">
                       <button
                         onClick={expandAll}
@@ -1164,15 +1471,29 @@ export function EditorClient({
                   : "w-full rounded-xl border border-zinc-200"
               }`}
             >
-              <iframe
-                ref={iframeRef}
-                src={site.preview_url}
-                title={`Vorschau: ${site.name}`}
-                className="h-full w-full"
-                // Nach jedem (Neu-)Laden der Vorschau den Klick-Modus erneut melden,
-                // weil die Website beim Laden auf "Finden" zurücksetzt
-                onLoad={() => sendSelectMode(selectMode)}
-              />
+              {previewUrlSafe ? (
+                <iframe
+                  ref={iframeRef}
+                  src={site.preview_url}
+                  title={`Vorschau: ${site.name}`}
+                  className="h-full w-full"
+                  // Nach jedem (Neu-)Laden der Vorschau den Klick-Modus erneut melden,
+                  // weil die Website beim Laden auf "Finden" zurücksetzt
+                  onLoad={() => sendSelectMode(selectMode)}
+                />
+              ) : (
+                <div className="flex h-full w-full flex-col items-center justify-center gap-2 p-6 text-center">
+                  <p className="text-sm font-semibold text-red-700">
+                    Vorschau deaktiviert
+                  </p>
+                  <p className="max-w-sm text-xs text-zinc-600">
+                    Die hinterlegte Vorschau-Adresse ist ungültig (erlaubt: https bzw.
+                    lokal http://localhost). Bitte die Agentur um Korrektur – aus
+                    Sicherheit werden keine Nachrichten mit unbekannten Seiten
+                    ausgetauscht.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1184,7 +1505,7 @@ export function EditorClient({
         open={historyOpen}
         onClose={() => setHistoryOpen(false)}
         onError={pushErrorToast}
-        onSuccess={(msg) => pushToast("success", msg)}
+        onSuccess={handleRestored}
         refreshSignal={historyRefresh}
       />
 
@@ -1343,291 +1664,6 @@ export function EditorClient({
           </div>
         ))}
       </div>
-    </div>
-  );
-}
-
-function StatusBadge({
-  status,
-  hasDrafts,
-  draftCount,
-  onOpenDiff,
-}: {
-  status: SaveStatus;
-  hasDrafts: boolean;
-  draftCount: number;
-  /** Wenn gesetzt: Badge ist anklickbar und öffnet den Diff-Inspektor */
-  onOpenDiff?: () => void;
-}) {
-  if (status === "saving") {
-    return (
-      <span className="flex items-center gap-1.5 text-xs font-medium text-zinc-500">
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        Speichern …
-      </span>
-    );
-  }
-  if (status === "saved" || hasDrafts) {
-    const label = `Entwurf gesichert (${draftCount} ungespeicherte Änderung${draftCount === 1 ? "" : "en"})`;
-    if (onOpenDiff) {
-      return (
-        <button
-          onClick={onOpenDiff}
-          title="Ausstehende Änderungen prüfen"
-          className="flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 transition hover:bg-amber-100"
-        >
-          <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-          {label}
-          <Eye className="h-3.5 w-3.5" />
-        </button>
-      );
-    }
-    return (
-      <span className="flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
-        <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-        {label}
-      </span>
-    );
-  }
-  return (
-    <span className="flex items-center gap-1.5 rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-600">
-      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
-      Bereit – Keine ungespeicherten Änderungen
-    </span>
-  );
-}
-
-/** Unaufdringlicher Zurücksetzen-Knopf pro Feld (Undo auf Live-Stand). */
-function UndoButton({ onUndo }: { onUndo: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onUndo}
-      title="Auf Live-Stand zurücksetzen"
-      className="rounded-md p-1 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700"
-    >
-      <RotateCcw className="h-3.5 w-3.5" />
-    </button>
-  );
-}
-
-const BANNER_FILE = "src/content/site.json";
-// Pfade OHNE "site."-Vorsatz: site.json liegt flach (banner.enabled),
-// die Website liest sie als site.banner (getSite liefert die Datei direkt)
-const BANNER_ENABLED_ID = `json:${BANNER_FILE}:banner.enabled`;
-const BANNER_VARIANT_ID = `json:${BANNER_FILE}:banner.variant`;
-const BANNER_TEXT_ID = `json:${BANNER_FILE}:banner.text`;
-
-const BANNER_VARIANTS = [
-  { id: "vacation", label: "🟡 Betriebsurlaub", pill: "bg-amber-500 text-white border-amber-500" },
-  { id: "emergency", label: "🔴 Dringend / Notfall", pill: "bg-red-500 text-white border-red-500" },
-  { id: "info", label: "🔵 Information", pill: "bg-blue-500 text-white border-blue-500" },
-] as const;
-
-/** Hinweis- & Urlaubsbanner: Schalter, Stil und Text – schreibt direkt Entwürfe. */
-function BannerCard({
-  values,
-  onChange,
-}: {
-  values: DraftMap;
-  onChange: (fieldId: string, value: string) => void;
-}) {
-  const enabled = (values[BANNER_ENABLED_ID] ?? "") === "true";
-  const variant = values[BANNER_VARIANT_ID] ?? "vacation";
-  const text = values[BANNER_TEXT_ID] ?? "";
-
-  return (
-    <div className="mb-4 rounded-2xl border border-zinc-200 bg-zinc-50/50 p-4">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm font-semibold text-zinc-900">
-          Hinweisbanner auf der Website anzeigen
-        </p>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={enabled}
-          onClick={() => onChange(BANNER_ENABLED_ID, enabled ? "false" : "true")}
-          className={`relative h-6 w-11 shrink-0 rounded-full transition ${
-            enabled ? "bg-emerald-500" : "bg-zinc-300"
-          }`}
-        >
-          <span
-            className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
-              enabled ? "left-[22px]" : "left-0.5"
-            }`}
-          />
-        </button>
-      </div>
-      <p className={`mt-0.5 text-xs font-medium ${enabled ? "text-emerald-700" : "text-zinc-400"}`}>
-        {enabled ? "AN" : "AUS"}
-      </p>
-
-      {enabled && (
-        <div className="mt-3 space-y-3">
-          <div className="flex flex-wrap gap-2">
-            {BANNER_VARIANTS.map((v) => {
-              const active = variant === v.id;
-              return (
-                <button
-                  key={v.id}
-                  type="button"
-                  onClick={() => onChange(BANNER_VARIANT_ID, v.id)}
-                  className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
-                    active
-                      ? v.pill
-                      : "border-zinc-300 bg-white text-zinc-600 hover:bg-zinc-100"
-                  }`}
-                >
-                  {v.label}
-                </button>
-              );
-            })}
-          </div>
-          <div>
-            <input
-              type="text"
-              value={text}
-              maxLength={160}
-              onChange={(e) => onChange(BANNER_TEXT_ID, e.target.value)}
-              placeholder="Wir sind vom 01. bis 15. August im Betriebsurlaub."
-              className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10"
-            />
-            <p className="mt-1 text-right text-xs text-zinc-400">
-              {text.length} / 160 Zeichen
-            </p>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function FieldEditor({
-  field,
-  value,
-  siteId,
-  onChange,
-  onError,
-  selected,
-  changed,
-  onUndo,
-}: {
-  field: ManifestField;
-  value: string;
-  siteId: string;
-  onChange: (value: string) => void;
-  onError: (message: string) => void;
-  /** true wenn das Feld gerade per Klick in der Vorschau ausgewählt wurde */
-  selected: boolean;
-  /** true wenn der Wert vom Live-Stand abweicht (Undo anbieten) */
-  changed: boolean;
-  onUndo: () => void;
-}) {
-  const baseClass =
-    "w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10";
-
-  const counter = field.maxLength
-    ? `${value.length} / ${field.maxLength} Zeichen`
-    : `${value.length} Zeichen`;
-  const counterTooLong = field.maxLength != null && value.length > field.maxLength;
-
-  // Anker-ID für "Klick in Vorschau springt hierher" + kurze Gelb-Markierung
-  return (
-    <div
-      id={`cms-field-${field.id}`}
-      className={`scroll-mt-4 rounded-xl transition ${
-        selected ? "bg-blue-50 p-3 ring-2 ring-blue-600" : ""
-      }`}
-    >
-      {field.type === "image" ? (
-        <>
-          {changed && (
-            <div className="mb-2 flex justify-end">
-              <UndoButton onUndo={onUndo} />
-            </div>
-          )}
-          <ImageField
-            field={field}
-            value={value}
-            siteId={siteId}
-            onChange={onChange}
-            onError={onError}
-          />
-        </>
-      ) : (
-        <div>
-          <div className="mb-1.5 flex items-center justify-between gap-2">
-            <label className="block text-sm font-medium text-zinc-700">
-              {field.label}
-            </label>
-            {changed && <UndoButton onUndo={onUndo} />}
-          </div>
-
-          {field.type === "text" && (
-            <input
-              type="text"
-              value={value}
-              placeholder={field.placeholder}
-              maxLength={field.maxLength}
-              onChange={(e) => onChange(e.target.value)}
-              className={baseClass}
-            />
-          )}
-
-          {["number", "email", "phone", "url", "date"].includes(field.type) && (
-            <input
-              type={field.type === "phone" ? "tel" : field.type}
-              value={value}
-              placeholder={field.placeholder}
-              maxLength={field.maxLength}
-              onChange={(e) => onChange(e.target.value)}
-              className={baseClass}
-            />
-          )}
-
-          {field.type === "textarea" && (
-            <textarea
-              value={value}
-              placeholder={field.placeholder}
-              maxLength={field.maxLength}
-              onChange={(e) => onChange(e.target.value)}
-              rows={4}
-              className={`${baseClass} resize-y`}
-            />
-          )}
-
-          {field.type === "boolean" && (
-            <button
-              type="button"
-              role="switch"
-              aria-checked={value === "true"}
-              onClick={() => onChange(value === "true" ? "false" : "true")}
-              className={`relative h-6 w-11 shrink-0 rounded-full transition ${
-                value === "true" ? "bg-emerald-500" : "bg-zinc-300"
-              }`}
-            >
-              <span
-                className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
-                  value === "true" ? "left-[22px]" : "left-0.5"
-                }`}
-              />
-            </button>
-          )}
-          {field.type === "boolean" && (
-            <p className={`mt-1 text-xs font-medium ${value === "true" ? "text-emerald-700" : "text-zinc-400"}`}>
-              {value === "true" ? "AN" : "AUS"}
-            </p>
-          )}
-
-          <p
-            className={`mt-1 text-right text-xs ${
-              counterTooLong ? "font-medium text-red-600" : "text-zinc-400"
-            }`}
-          >
-            {counter}
-          </p>
-        </div>
-      )}
     </div>
   );
 }

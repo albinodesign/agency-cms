@@ -1,50 +1,55 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { requireSiteAccess } from "@/lib/auth";
 
 /** Liefert das letzte Gespräch einer Website mit Nachrichten (zum Fortsetzen). */
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const siteId = searchParams.get("siteId");
-  if (!siteId) {
-    return NextResponse.json({ error: "siteId fehlt." }, { status: 400 });
-  }
 
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Nicht authentifiziert." }, { status: 401 });
-  }
+  // Zugriff prüfen (zentral: Session + user_sites + Site, src/lib/auth.ts)
+  const access = await requireSiteAccess(siteId);
+  if (!access.ok) return access.error;
+  const { supabase, user, site } = access;
+  const verifiedSiteId = site.id;
 
-  const { data: assignment } = await supabase
-    .from("user_sites")
-    .select("site_id")
-    .eq("user_id", user.id)
-    .eq("site_id", siteId)
-    .maybeSingle();
-  if (!assignment) {
-    return NextResponse.json({ error: "Kein Zugriff auf diese Website." }, { status: 403 });
-  }
-
-  const { data: conv } = await supabase
+  // W10: Nur eigene Gespräche (plus alte ohne Ersteller) – fremde
+  // Gespräche derselben Site bleiben unsichtbar.
+  // W12: DB-Fehler nicht still als „kein Verlauf" werten.
+  const { data: conv, error: convError } = await supabase
     .from("ai_conversations")
-    .select("id,title,updated_at")
-    .eq("site_id", siteId)
+    .select("id,title,updated_at,created_by")
+    .eq("site_id", verifiedSiteId)
+    .or(`created_by.eq.${user.id},created_by.is.null`)
     .order("updated_at", { ascending: false })
     .limit(1)
     .maybeSingle();
+  if (convError) {
+    console.error("ai/history: Gespräche laden fehlgeschlagen:", convError.message);
+    return NextResponse.json(
+      { error: "Verlauf konnte nicht geladen werden. Details stehen im Server-Protokoll." },
+      { status: 500 }
+    );
+  }
 
   if (!conv) {
     return NextResponse.json({ conversation: null, messages: [] });
   }
+  const conversation = conv as { id: string; title: string; updated_at: string };
 
-  const { data: rows } = await supabase
+  // W12: DB-Fehler nicht still als „kein Verlauf" werten.
+  const { data: rows, error: rowsError } = await supabase
     .from("ai_messages")
     .select("role,content,created_at")
-    .eq("conversation_id", (conv as { id: string }).id)
+    .eq("conversation_id", conversation.id)
     .order("created_at", { ascending: true })
     .limit(40);
+  if (rowsError) {
+    console.error("ai/history: Nachrichten laden fehlgeschlagen:", rowsError.message);
+    return NextResponse.json(
+      { error: "Verlauf konnte nicht geladen werden. Details stehen im Server-Protokoll." },
+      { status: 500 }
+    );
+  }
 
   const messages = ((rows ?? []) as Array<{ role: string; content: { text?: string; dateien?: Array<{ name?: string; url?: string; mediaType?: string }> } | null }>)
     .filter((r) => r.role === "user" || r.role === "assistant")
@@ -55,5 +60,5 @@ export async function GET(request: Request) {
     }))
     .filter((m) => m.text !== "" || m.dateien.length > 0);
 
-  return NextResponse.json({ conversation: conv, messages });
+  return NextResponse.json({ conversation, messages });
 }

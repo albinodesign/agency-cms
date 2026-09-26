@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { ImagePlus, Loader2, UploadCloud } from "lucide-react";
+import { ImagePlus, Loader2, Trash2, UploadCloud } from "lucide-react";
 import type { ManifestField } from "@/types/cms";
 
 const BUCKET = "cms-media";
@@ -87,6 +87,12 @@ export function ImageField({
       onError("Nur Bilddateien sind erlaubt (PNG, JPG, WebP, …).");
       return;
     }
+    // W10: SVG ablehnen – skalierbare Vektorgrafiken können Skripte enthalten
+    // und liefen als öffentliche Datei im Bucket (kein SVG-Upload, PNG/JPG/WebP nutzen).
+    if (file.type === "image/svg+xml" || /\.svg$/i.test(file.name)) {
+      onError("SVG-Bilder sind aus Sicherheitsgründen nicht erlaubt. Bitte PNG, JPG oder WebP verwenden.");
+      return;
+    }
     if (file.size > MAX_ORIGINAL_BYTES) {
       onError("Dieses Bild ist größer als 15 MB. Bitte wähle ein kleineres Bild.");
       return;
@@ -115,7 +121,12 @@ export function ImageField({
         .upload(path, uploadBlob, { cacheControl: "3600", upsert: false });
 
       if (uploadError) {
-        onError(`Upload fehlgeschlagen: ${uploadError.message}`);
+        // W12: Technische Speicher-Meldungen (RLS/Policies) nicht 1:1 zeigen.
+        const roh = uploadError.message ?? "";
+        const freundlich = /row.?level|policy|policies|permission|berechtigung|jwt|token|bucket/i.test(roh)
+          ? "Keine Berechtigung für diesen Ordner oder Speicher nicht eingerichtet. Bitte die Agentur fragen."
+          : roh;
+        onError(`Upload fehlgeschlagen: ${freundlich}`);
         return;
       }
 
@@ -175,19 +186,32 @@ export function ImageField({
               ? "Bild wird verkleinert & hochgeladen …"
               : "Bild hierher ziehen oder"}
           </p>
-          <button
-            type="button"
-            disabled={uploading}
-            onClick={() => inputRef.current?.click()}
-            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-60"
-          >
-            {uploading ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <UploadCloud className="h-3.5 w-3.5" />
+          <div className="flex shrink-0 items-center gap-2">
+            {value && !uploading && (
+              <button
+                type="button"
+                onClick={() => onChange("")}
+                title="Bild entfernen (Feld leeren)"
+                className="flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-500 transition hover:bg-zinc-100 hover:text-red-600"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Leeren
+              </button>
             )}
-            Bild austauschen
-          </button>
+            <button
+              type="button"
+              disabled={uploading}
+              onClick={() => inputRef.current?.click()}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-60"
+            >
+              {uploading ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <UploadCloud className="h-3.5 w-3.5" />
+              )}
+              Bild austauschen
+            </button>
+          </div>
         </div>
 
         <input

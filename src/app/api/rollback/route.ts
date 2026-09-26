@@ -1,8 +1,16 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import { createOctokit } from "@/lib/github";
-import { isAllowedCodePath, isAllowedContentPath } from "@/lib/ai";
-import type { PublishHistoryEntry, Site } from "@/types/cms";
+import { requireSiteAccess } from "@/lib/auth";
+import { beschraenkeVerlauf, insertPublishHistory } from "@/lib/history";
+import { commitFileWithRetry, createOctokit, getManifest, getRepoFile } from "@/lib/github";
+import { AI_MAX_FILE_CHARS, breaksBridge, isAllowedCodePath, isAllowedContentPath } from "@/lib/ai";
+import {
+  SITE_JSON,
+  findDangerousKeys,
+  getBannerProblems,
+  parseFreeDraftIdSafe,
+} from "@/lib/content-guard";
+import type { Draft, PublishHistoryEntry } from "@/types/cms";
+import { FREE_DRAFT_PREFIX } from "@/types/cms";
 
 const COMMIT_MESSAGE = "cms: rollback to historical version";
 
@@ -39,15 +47,6 @@ function isValidPayload(payload: unknown): payload is Payload {
 
 export async function POST(request: Request) {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json({ error: "Nicht authentifiziert." }, { status: 401 });
-    }
-
     let body: { siteId?: string; historyId?: string };
     try {
       body = await request.json();
@@ -55,37 +54,18 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Ungültiger Request-Body." }, { status: 400 });
     }
 
-    const { siteId, historyId } = body;
-    if (!siteId) {
-      return NextResponse.json({ error: "siteId fehlt." }, { status: 400 });
-    }
+    const { siteId: requestedSiteId, historyId } = body;
     if (!historyId) {
       return NextResponse.json({ error: "historyId fehlt." }, { status: 400 });
     }
 
-    // Zugriff prüfen
-    const { data: assignment } = await supabase
-      .from("user_sites")
-      .select("site_id")
-      .eq("user_id", user.id)
-      .eq("site_id", siteId)
-      .maybeSingle();
+    // Zugriff prüfen (zentral: Session + user_sites + Site, src/lib/auth.ts)
+    const access = await requireSiteAccess(requestedSiteId);
+    if (!access.ok) return access.error;
+    const { supabase, user, site } = access;
 
-    if (!assignment) {
-      return NextResponse.json({ error: "Kein Zugriff auf diese Website." }, { status: 403 });
-    }
-
-    const { data: site, error: siteError } = await supabase
-      .from("sites")
-      .select("*")
-      .eq("id", siteId)
-      .single();
-
-    if (siteError || !site) {
-      return NextResponse.json({ error: "Website nicht gefunden." }, { status: 404 });
-    }
-
-    const typedSite = site as Site;
+    const siteId = site.id;
+    const typedSite = site;
 
     // Payload ausschließlich serverseitig über historyId aus publish_history laden
     const { data: entry, error: entryError } = await supabase
@@ -100,6 +80,12 @@ export async function POST(request: Request) {
     }
 
     const payload: unknown = (entry as PublishHistoryEntry).payload;
+    if (payload === undefined || payload === null) {
+      return NextResponse.json(
+        { error: "Diese Version enthält keinen wiederherstellbaren Payload." },
+        { status: 400 }
+      );
+    }
 
     if (!isValidPayload(payload)) {
       return NextResponse.json(
@@ -122,13 +108,83 @@ export async function POST(request: Request) {
       );
     }
 
+    // B6: Rollback-Kandidat vor dem ersten Commit prüfen (wie beim Publish):
+    // JSON muss ein sauberes Objekt sein, keine gefährlichen Schlüssel, Banner
+    // muss in sich gültig sein, Text-Dateien begrenzt groß. Fehlerhafte Dateien
+    // werden einzeln zurückgehalten statt alles abzubrechen.
+    const fileErrors = new Map<string, string[]>();
+    const holdBack = (file: string, message: string): void => {
+      const list = fileErrors.get(file) ?? [];
+      list.push(message);
+      fileErrors.set(file, list);
+    };
+    for (const [filePath, oldContent] of Object.entries(payload)) {
+      const raw = asRawText(oldContent);
+      if (raw !== null) {
+        if (raw.length > AI_MAX_FILE_CHARS) {
+          holdBack(filePath, `Die gespeicherte Version von "${filePath}" ist zu groß und wird nicht zurückgerollt.`);
+        }
+        continue;
+      }
+      const dangerous = findDangerousKeys(oldContent);
+      if (dangerous.length > 0) {
+        holdBack(
+          filePath,
+          `Die gespeicherte Version von "${filePath}" enthält verbotene Schlüssel (${dangerous.join(", ")}) und wird nicht zurückgerollt.`
+        );
+        continue;
+      }
+      if (filePath === SITE_JSON) {
+        const banner = (oldContent as Record<string, unknown>).banner;
+        if (banner !== undefined) {
+          for (const problem of getBannerProblems(banner)) holdBack(filePath, problem);
+        }
+      }
+    }
+
+    // Manifest laden, um später nur Entwürfe zurückgerollter Dateien zu löschen
+    // (unbeteiligte Arbeit bleibt erhalten). Scheitert das Laden, wird vor dem
+    // ersten Commit abgebrochen – es geht nichts verloren.
+    const fieldFileOf = new Map<string, string>();
+    try {
+      const octokitForManifest = createOctokit();
+      const manifest = await getManifest(
+        octokitForManifest,
+        typedSite.repo_owner,
+        typedSite.repo_name
+      );
+      for (const section of manifest.sections) {
+        for (const field of section.fields) {
+          if (!fieldFileOf.has(field.id)) fieldFileOf.set(field.id, field.file);
+        }
+      }
+    } catch (err) {
+      return NextResponse.json(
+        {
+          error: `Feldliste konnte nicht aus GitHub geladen werden, Rollback abgebrochen (nichts wurde geändert): ${
+            err instanceof Error ? err.message : "Unbekannter Fehler"
+          }`,
+        },
+        { status: 502 }
+      );
+    }
+
     const octokit = createOctokit();
     let lastCommitSha: string | null = null;
+    const restoredFiles: string[] = [];
+    const failedFiles: Array<{ file: string; error: string }> = [];
 
     // Jede Datei im Payload: aktuellen SHA holen, alten Stand darüber committen
-    // (JSON als formatiertes JSON, Text-Dateien wie Blog/Code als Rohtext)
+    // (JSON als formatiertes JSON, Text-Dateien wie Blog/Code als Rohtext).
+    // B6: Jede Datei läuft einzeln – ein Fehler hält nur seine Datei auf, der
+    // Rest wird trotzdem zurückgerollt. Bei SHA-Konflikt einmal neu versuchen.
     for (const [filePath, oldContent] of Object.entries(payload)) {
-      let currentSha: string;
+      if (fileErrors.has(filePath)) continue;
+      const raw = asRawText(oldContent);
+      const newText = raw ?? JSON.stringify(oldContent, null, 2);
+
+      let currentSha: string | null = null;
+      let currentText: string | null = null;
       try {
         const { data } = await octokit.repos.getContent({
           owner: typedSite.repo_owner,
@@ -140,90 +196,162 @@ export async function POST(request: Request) {
           throw new Error(`"${filePath}" ist keine Datei im Repository.`);
         }
         currentSha = data.sha;
+        currentText =
+          typeof data.content === "string"
+            ? Buffer.from(data.content, "base64").toString("utf-8")
+            : null;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`Rollback: SHA für "${filePath}" nicht ladbar:`, message);
-        return NextResponse.json(
-          { error: `GitHub-Fehler beim Laden von "${filePath}": ${message}` },
-          { status: 500 }
-        );
+        failedFiles.push({ file: filePath, error: `GitHub-Fehler beim Laden: ${message}` });
+        continue;
       }
 
-      try {
-        const raw = asRawText(oldContent);
-        const { data: commitData } = await octokit.repos.createOrUpdateFileContents({
-          owner: typedSite.repo_owner,
-          repo: typedSite.repo_name,
-          path: filePath,
-          message: COMMIT_MESSAGE,
-          content: Buffer.from(raw ?? JSON.stringify(oldContent, null, 2)).toString("base64"),
-          sha: currentSha,
-          branch: "main",
+      // Brücken-Schutz auch beim Zurückrollen: Keine Version ohne
+      // CMS-Vorschau-Brücke einspielen (gegen versehentlich alte Stände).
+      if (raw !== null && currentText !== null && isAllowedCodePath(filePath) && breaksBridge(currentText, newText)) {
+        failedFiles.push({
+          file: filePath,
+          error: `Die gespeicherte Version von "${filePath}" würde die CMS-Vorschau-Brücke entfernen und wird nicht zurückgerollt.`,
         });
-        lastCommitSha = commitData.commit.sha ?? null;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`Rollback: Commit für "${filePath}" fehlgeschlagen:`, message);
-        return NextResponse.json(
-          { error: `GitHub-Fehler beim Committen von "${filePath}": ${message}` },
-          { status: 500 }
-        );
+        continue;
       }
+
+      // Commit über den gemeinsamen Helfer (ein Retry bei SHA-Konflikt, W3)
+      const commitResult = await commitFileWithRetry(
+        octokit,
+        typedSite.repo_owner,
+        typedSite.repo_name,
+        COMMIT_MESSAGE,
+        { file: filePath, text: newText, sha: currentSha as string },
+        async () => {
+          const fresh = await getRepoFile(octokit, typedSite.repo_owner, typedSite.repo_name, filePath);
+          return fresh.sha;
+        }
+      );
+      if (!commitResult.ok) {
+        console.error(`Rollback: Commit für "${filePath}" fehlgeschlagen (Details oben).`);
+        failedFiles.push({
+          file: filePath,
+          error: commitResult.error
+            .replace(/^GitHub-Commit für "[^"]+" fehlgeschlagen: /, `GitHub-Fehler beim Zurückrollen von "${filePath}": `),
+        });
+        continue;
+      }
+      lastCommitSha = commitResult.sha;
+      restoredFiles.push(filePath);
     }
 
-    // Alle offenen Entwürfe dieser Site verwerfen (Formular + Code)
-    const { error: deleteError } = await supabase
-      .from("drafts")
-      .delete()
-      .eq("site_id", siteId);
-
-    if (deleteError) {
-      console.error("Rollback: drafts delete fehlgeschlagen:", deleteError.message);
+    // Nichts zurückgerollt? Dann ehrlich melden – keine History, keine Löschung.
+    if (restoredFiles.length === 0) {
+      const heldBack = [...fileErrors.entries()].flatMap(([file, msgs]) =>
+        msgs.map((m) => `[${file}] ${m}`)
+      );
+      const failedNote = failedFiles.map((f) => `[${f.file}] ${f.error}`);
       return NextResponse.json(
         {
-          error: `Rollback wurde committet, aber die Entwürfe konnten nicht gelöscht werden: ${deleteError.message}`,
+          error: `Es wurde nichts wiederhergestellt (keine Änderung, keine Löschung):\n- ${[...heldBack, ...failedNote].join("\n- ")}`,
         },
         { status: 500 }
       );
     }
 
+    // B6: Nur Entwürfe löschen, deren Datei wirklich zurückgerollt wurde.
+    // Alle anderen Entwürfe (unbeteiligte Arbeit) bleiben erhalten.
+    const restoredSet = new Set(restoredFiles);
+    const { data: draftRows, error: draftsLoadError } = await supabase
+      .from("drafts")
+      .select("id,field_id")
+      .eq("site_id", siteId);
+
+    if (draftsLoadError) {
+      console.error("Rollback: drafts laden fehlgeschlagen:", draftsLoadError.message);
+      return NextResponse.json(
+        {
+          error: `Rollback wurde committet (${restoredFiles.length} Datei(en)), aber die Entwürfe konnten nicht geprüft werden – Entwürfe bleiben erhalten, bitte ggf. manuell aufräumen. Details stehen im Server-Protokoll.`,
+        },
+        { status: 500 }
+      );
+    }
+
+    const draftIdsToDelete: string[] = [];
+    for (const row of ((draftRows ?? []) as Draft[])) {
+      const mapped = fieldFileOf.get(row.field_id);
+      if (mapped && restoredSet.has(mapped)) {
+        draftIdsToDelete.push(row.id);
+        continue;
+      }
+      if (row.field_id.startsWith(FREE_DRAFT_PREFIX)) {
+        const parsed = parseFreeDraftIdSafe(row.field_id);
+        if (parsed.ok && restoredSet.has(parsed.file)) draftIdsToDelete.push(row.id);
+      }
+    }
+    if (draftIdsToDelete.length > 0) {
+      const { error: deleteError } = await supabase
+        .from("drafts")
+        .delete()
+        .eq("site_id", siteId)
+        .in("id", draftIdsToDelete);
+      if (deleteError) {
+        console.error("Rollback: drafts delete fehlgeschlagen:", deleteError.message);
+        return NextResponse.json(
+          {
+            error: "Rollback wurde committet, aber die Entwürfe konnten nicht gelöscht werden. Details stehen im Server-Protokoll.",
+          },
+          { status: 500 }
+        );
+      }
+    }
+
     const { error: codeDeleteError } = await supabase
       .from("code_drafts")
       .delete()
-      .eq("site_id", siteId);
+      .eq("site_id", siteId)
+      .in("file_path", restoredFiles);
 
     if (codeDeleteError) {
       console.error("Rollback: code_drafts delete fehlgeschlagen:", codeDeleteError.message);
     }
 
-    // Rollback als neuen Verlaufseintrag dokumentieren (mit Notiz "Rollback")
+    // Rollback als neuen Verlaufseintrag dokumentieren (mit Notiz "Rollback",
+    // plus Dateiliste – mit Fallbacks für alte Tabellen, src/lib/history.ts).
+    // Gesichert wird nur, was wirklich zurückgerollt wurde.
+    const restoredPayload: Payload = {};
+    for (const filePath of restoredFiles) {
+      restoredPayload[filePath] = payload[filePath] as Record<string, unknown>;
+    }
     const historyRow = {
       site_id: siteId,
       published_by: user.id ?? null,
       commit_sha: lastCommitSha,
-      payload,
+      payload: restoredPayload,
+      note: "Rollback",
     };
-    const { error: historyError } = await supabase
-      .from("publish_history")
-      .insert({ ...historyRow, note: "Rollback" });
-
+    const { error: historyError } = await insertPublishHistory(supabase, historyRow, restoredFiles);
     if (historyError) {
-      // Fallback für Tabellen ohne "note"-Spalte
-      const { error: retryError } = await supabase
-        .from("publish_history")
-        .insert(historyRow);
-      if (retryError) {
-        console.error("Rollback: publish_history insert fehlgeschlagen:", retryError);
-      } else {
-        console.log(`publish_history: Rollback für Site ${siteId} gespeichert (Commit ${lastCommitSha ?? "unbekannt"})`);
-      }
+      console.error("Rollback: publish_history insert fehlgeschlagen (Details oben).");
     } else {
       console.log(`publish_history: Rollback für Site ${siteId} gespeichert (Commit ${lastCommitSha ?? "unbekannt"})`);
+      // W18: Verlauf schlank halten (Fehler nur loggen)
+      await beschraenkeVerlauf(supabase, siteId);
     }
 
+    const partialNote =
+      failedFiles.length > 0 || fileErrors.size > 0
+        ? ` Zurückgehalten/fehlgeschlagen: ${[
+            ...[...fileErrors.entries()].flatMap(([file, msgs]) =>
+              msgs.map((m) => `${file} (${m})`)
+            ),
+            ...failedFiles.map((f) => `${f.file} (${f.error})`),
+          ].join("; ")}.`
+        : "";
     return NextResponse.json({
-      message: `Version erfolgreich wiederhergestellt (${Object.keys(payload).length} Datei(en) live geschaltet).`,
+      message: `Version wiederhergestellt (${restoredFiles.length} von ${Object.keys(payload).length} Datei(en) live geschaltet).${partialNote}`,
       commitSha: lastCommitSha,
+      restoredFiles,
+      failed: failedFiles,
+      blocked: [...fileErrors.entries()].map(([file, errors]) => ({ file, errors })),
+      partial: failedFiles.length > 0 || fileErrors.size > 0,
     });
   } catch (err) {
     console.error("Rollback fehlgeschlagen:", err);

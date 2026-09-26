@@ -16,10 +16,11 @@ npm run dev        # Dev-Server starten
 npm run build      # Produktions-Build
 npm start          # Produktions-Server
 npm run lint       # ESLint (eslint-config-next, core-web-vitals + typescript)
-npm run test       # Alle Abnahme-Suiten (reparatur1/1b/1c/1d, ohne Netz/Produktion)
+npm run test       # Alle Suiten: Unit-Tests (node:test) + Abnahme-Suiten (reparatur1/1b/1c/1d, ohne Netz/Produktion)
+npm run test:unit  # Nur Unit-Tests reiner Funktionen (scripts/unit/*.test.mjs)
 ```
 
-Es gibt kein allgemeines Test-Framework im Projekt; Qualitätssicherung erfolgt über `npm run lint` und `npm run build` (TypeScript `strict` ist aktiviert) sowie die Abnahme-Skripte `scripts/reparatur1-check.mjs`, `scripts/reparatur1b-publish-check.mjs`, `scripts/reparatur1c-check.mjs` und `scripts/reparatur1d-check.mjs` (kompilieren echte Routen-/Werkzeugfunktionen mit lokalen Adaptern, jede fehlgeschlagene Assertion gibt Fehler-Exit-Code). Alle Befehle müssen nach einer Änderung fehlerfrei durchlaufen.
+Qualitätssicherung erfolgt über `npm run lint` und `npm run build` (TypeScript `strict` ist aktiviert), die Unit-Suiten `scripts/unit/*.test.mjs` (reine Funktionen aus `json-path`/`validate`/`slugify`/`content-guard`/`github`/`history`, kompiliert mit Projekt-TypeScript, Runner `scripts/run-unit-tests.mjs`) sowie die Abnahme-Skripte `scripts/reparatur1-check.mjs`, `scripts/reparatur1b-publish-check.mjs`, `scripts/reparatur1c-check.mjs` und `scripts/reparatur1d-check.mjs` (kompilieren echte Routen-/Werkzeugfunktionen mit lokalen Adaptern, jede fehlgeschlagene Assertion gibt Fehler-Exit-Code). CI (`.github/workflows/ci.yml`) lässt lint + build + test bei jedem Push/PR laufen. Alle Befehle müssen nach einer Änderung fehlerfrei durchlaufen.
 
 ## Umgebungsvariablen
 
@@ -29,21 +30,22 @@ In `.env.local` (Vorlage: `.env.local.example`, die erforderlichen Werte stehen 
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY` – öffentlicher Anon-Key
 - `SUPABASE_SERVICE_ROLE_KEY` – **nur serverseitig**, umgeht RLS komplett (Admin-Client in `src/lib/supabase/admin.ts`, nur in `src/app/api/admin/` verwenden)
 - `GITHUB_TOKEN` – Fine-grained PAT mit `Contents: Read & Write` auf die Kunden-Repos
+- `OPENROUTER_API_KEY` – nur für den KI-Chat (Modellwechsel = nur `AI_MODEL` ändern, exakte ID aus OpenRouter)
 
 ## Architektur
 
 ### Datenfluss (Publish-Flow)
 
 1. Der Editor (`/editor/[siteId]`, Server Component in `src/app/editor/[siteId]/page.tsx`, mit `export const dynamic = "force-dynamic"`) lädt serverseitig das CMS-Manifest und die referenzierten Content-Dateien per GitHub API aus dem Website-Repo (strikt nur `.json`-Dateien, niemals Markdown) sowie die Entwürfe aus Supabase; Entwürfe überschreiben Live-Werte.
-2. Eingaben im Editor (`src/components/editor/EditorClient.tsx`) werden clientseitig mit 800-ms-Debounce pro Feld direkt per Supabase-Client in die Tabelle `drafts` geupsertet (`onConflict: "site_id,field_id"`, RLS-geschützt, kein eigener API-Route dafür) und sofort per `postMessage` (`{ type: "CMS_FIELD_UPDATE", field, value }`) an die Vorschau-Iframe geschickt – als targetOrigin wird der konkrete Origin von `site.preview_url` verwendet (nie `"*"`).
-3. `POST /api/publish` lädt Live-Manifest und Entwürfe vom Server (`getManifestRaw`; ein Manifest-Entwurf im Satz ersetzt die Live-Definition), baut daraus den vollständigen Kandidaten (Live + Voll-Datei-Entwürfe + alle Feldänderungen mit gemeinsamer Typ-Auflösung `resolveEditType`/`convertEditValue` aus `src/lib/content-guard.ts` – dieselben Funktionen wie im Chat) und prüft ihn **je angefasster Datei** (Mittelweg statt Alles-oder-nichts): effektives Manifest (global nur doppelte IDs und verbotene Zieldateien; Rest je Datei), strikte Endtypen je deklariertem Typ (`validateFinalJsonValue` in `src/lib/validate.ts`: Zahlen sind echte endliche Zahlen, Booleans echte Booleans, Text bleibt Text, null/leer abgelehnt; Aliase erben Typ/Länge), Banner-Endstand bei vorhandenem Banner in angefasster `site.json` (`getBannerProblems`: Stil-Enum, max. 160 Zeichen, an braucht Stil + Text), Listen-Strukturen und Typtreue je Datei (`validateListStructures`/`validateScalarTypePreservation`: nur ausdrücklich in `DYNAMIC_LIST_MODELS` modellierte Listen – derzeit nur FAQ `items` mit `frage`+`antwort` – dürfen am Ende modellvollständig wachsen; alle anderen Listen sind fest). Sichere Pfade (`src/lib/json-path.ts`). Unberührte Dateien blockieren nichts mehr. Jede saubere Datei wird committet (`cms: update content by client` auf `main`, Snapshot in `publish_history` nur mit veröffentlichten Dateien); blockierte Dateien bleiben als Entwurf erhalten und werden je Datei mit Grund in `blocked` genannt (Antwort enthält zusätzlich `publishedFieldIds`, damit der Editor genau diese Felder als live markiert). Rein fehlerhafte Sätze weiter 400 ohne Writes. Jeder Fehler bricht nur seine Datei ab; Unbekanntes bleibt Entwurf und wird offengelegt.
-4. `POST /api/rollback` stellt eine frühere Version wieder her – ausschließlich über `historyId` (Payload wird serverseitig aus `publish_history` geladen; ein mitgeschickter `body.payload` wird nicht akzeptiert). Die Dateipfade im Payload sind gewhitelistet: Nur `.json`-Dateien unter `src/content/` dürfen überschrieben werden (Commit `cms: rollback to historical version`). Danach werden **alle** offenen Entwürfe der Site gelöscht und der Rollback als neuer Verlaufseintrag dokumentiert (mit `note: "Rollback"`, Fallback ohne `note`-Spalte).
+2. Eingaben im Editor (`src/components/editor/EditorClient.tsx`) werden clientseitig mit 800-ms-Debounce pro Feld direkt per Supabase-Client in die Tabelle `drafts` geupsertet (`onConflict: "site_id,field_id"`, RLS-geschützt, kein eigener API-Route dafür) und sofort per `postMessage` (`{ type: "CMS_FIELD_UPDATE", field, value }`) an die Vorschau-Iframe geschickt – als targetOrigin wird der konkrete Origin von `site.preview_url` verwendet (nie `"*"`). Vor jedem Publish werden alle noch wartenden Tipp-Stände sofort gespeichert (Flush, Button zeigt „Speichern …"), damit keine sichtbare Änderung verloren geht. Die Vorschau-Adresse wird hart geprüft (nur http(s)); bei ungültiger Adresse ist Vorschau + Nachrichten-Empfang deaktiviert. Eingehende `CMS_FIELD_SELECT`-Nachrichten werden gegen erwarteten Origin, erwartetes Iframe-Fenster und gültige Feld-ID geprüft.
+3. `POST /api/publish` lädt Live-Manifest und Entwürfe vom Server (`getManifestRaw`; ein Manifest-Entwurf im Satz ersetzt die Live-Definition), baut daraus den vollständigen Kandidaten (Live + Voll-Datei-Entwürfe + alle Feldänderungen mit gemeinsamer Typ-Auflösung `resolveEditType`/`convertEditValue` aus `src/lib/content-guard.ts` – dieselben Funktionen wie im Chat) und prüft ihn **je angefasster Datei** (Mittelweg statt Alles-oder-nichts): effektives Manifest (global nur doppelte IDs und verbotene Zieldateien; Rest je Datei), strikte Endtypen je deklariertem Typ (`validateFinalJsonValue` in `src/lib/validate.ts`: Zahlen sind echte endliche Zahlen, Booleans echte Booleans, Text bleibt Text, null/leer abgelehnt; Aliase erben Typ/Länge), Banner-Endstand bei vorhandenem Banner in angefasster `site.json` (`getBannerProblems`: Stil-Enum, max. 160 Zeichen, an braucht Stil + Text), Listen-Strukturen und Typtreue je Datei (`validateListStructures`/`validateScalarTypePreservation`: nur ausdrücklich in `DYNAMIC_LIST_MODELS` modellierte Listen – derzeit nur FAQ `items` mit `frage`+`antwort` – dürfen am Ende modellvollständig wachsen; alle anderen Listen sind fest). Sichere Pfade (`src/lib/json-path.ts`). Unberührte Dateien blockieren nichts mehr. Jede saubere Datei wird committet (`cms: update content by client` auf `main`, bei SHA-Konflikt einmal mit frischem SHA erneut versucht, Snapshot in `publish_history` nur mit veröffentlichten Dateien); blockierte Dateien bleiben als Entwurf erhalten und werden je Datei mit Grund in `blocked` genannt, fehlgeschlagene Commits in `failed` (Antwort enthält zusätzlich `publishedFieldIds`, damit der Editor genau diese Felder als live markiert, sowie `partial: true`, sobald etwas zurückgehalten wurde oder Commits fehlschlugen – der Editor zeigt dann Warnung statt Jubel). Rein fehlerhafte Sätze weiter 400 ohne Writes. Jeder Fehler bricht nur seine Datei ab; Unbekanntes bleibt Entwurf und wird offengelegt.
+4. `POST /api/rollback` stellt eine frühere Version wieder her – ausschließlich über `historyId` (Payload wird serverseitig aus `publish_history` geladen; ein mitgeschickter `body.payload` wird nicht akzeptiert). Die Dateipfade im Payload sind gewhitelistet: Nur erlaubte Inhalts-/Code-Dateien dürfen überschrieben werden. Jede Datei wird vor dem Commit einzeln geprüft (sauberes JSON-Objekt ohne gefährliche Schlüssel, gültiger Banner-Stand bei `site.json`, Brücken-Schutz für Code-Dateien); fehlerhafte Dateien werden zurückgehalten, der Rest wird trotzdem zurückgerollt (Antwort mit `restoredFiles`/`failed`/`blocked`/`partial`). Danach werden **nur** Entwürfe gelöscht, deren Datei wirklich zurückgerollt wurde (Manifest-Felder + freie Aliase + Code-Drafts dieser Dateien) – unbeteiligte Arbeit bleibt erhalten. Der Rollback wird als neuer Verlaufseintrag dokumentiert (mit `note: "Rollback"`, Fallback ohne `note`-Spalte; gesichert wird nur Zurückgerolltes).
 
 ### CMS-Manifest
 
 Der Editor rendert seine Felder aus `src/content/cms.manifest.json` im jeweiligen Website-Repo. Felder haben `id`, `label`, `type` (`text` | `textarea` | `image` | `number` | `email` | `phone` | `url` | `date` | `boolean`), `file` (nur `src/content/site.json` oder `src/content/pages/*.json` als normales Inhaltsziel) und `path` (sicherer Pfad, inkl. Listen-Schreibweisen `items[0].x`/`items.0.x`), optional `placeholder` und `maxLength`. `features.blog: true` (oder `{ blog: { enabled: true } }`) aktiviert den Blog-Tab. `normalizeManifest` in `src/lib/github.ts` akzeptiert toleranterweise mehrere Formate (Array von Sektionen/Feldern, `{ sections }`, `{ fields }`); Sektionen ohne gültige Felder fallen weg. Toleranzen im Detail: Sektions-ID `id || section || section-N`, Sektions-Titel `label || title || sectionLabel || id || section || Sektion N`, Feld-Label `label || title || id`; Felder mit unbekanntem `type` werden als `text` übernommen statt verworfen, Pflichtangaben ohne `id`/`file`/`path` werden herausgefiltert.
 
-Im Editor gruppiert `detectPageLabel` (`src/components/editor/EditorClient.tsx`) die Sektionen per Schlüsselwort-Heuristik (ID/Titel, sonst Dateiname im `file`-Pfad) zu Seiten-Tabs (z. B. Startseite, Leistungen, Kontakt, Firmendaten); innerhalb einer Seite bleiben die Sektionen Akkordeons, die Suche durchsucht seitenübergreifend alle Felder. Nach dem Veröffentlichen zeigt der Editor 45 s lang eine blaue Deployment-Box mit Fortschrittsbalken und lädt danach die Vorschau automatisch neu.
+Im Editor gruppiert `detectPageLabel` (`src/components/editor/EditorClient.tsx`) die Sektionen per Schlüsselwort-Heuristik (ID/Titel, sonst Dateiname im `file`-Pfad) zu Seiten-Tabs (z. B. Startseite, Leistungen, Kontakt, Firmendaten); innerhalb einer Seite bleiben die Sektionen Akkordeons, die Suche durchsucht seitenübergreifend alle Felder. Dynamische Listen legt die Agentur deklarativ im Manifest an (`listenmodelle`: Datei + Punkt-Pfad + Feldtypen; `modelleAusManifest` in `src/lib/content-guard/list-models.ts`, eingebaut immer FAQ) – ohne Eintrag sind Listen fest. Nach dem Veröffentlichen zeigt der Editor den echten Aufbau-Status (Poll alle 10 s, max. 18× = 3 Min. via `GET /api/site/[siteId]/deploy-status?sha=`) und lädt danach die Vorschau automatisch neu. Stille Manifest-Deutungen (unbekannte Typen → Text, weggelassene Einträge, Fallback-Kennungen) zeigt der Editor als bernsteinfarbene Warnbox mit Anzahl und Stelle (`normalizeManifestWithWarnings` in `src/lib/github.ts`).
 
 ### Blog-Engine
 
@@ -61,35 +63,45 @@ src/
 │   ├── editor/[siteId]/     # Editor (Server Component lädt Daten, Client rendert; loading.tsx)
 │   ├── globals.css          # Tailwind-Styles
 │   └── api/
-│       ├── publish/         # Entwürfe -> GitHub-Commits + publish_history
-│       ├── rollback/        # Wiederherstellung aus publish_history
-│       ├── blog/            # Blog-Artikel CRUD (Markdown im Repo)
-│       ├── admin/create-site/  # Site + Kunden-Nutzer anlegen (nur Admins, Service Role)
+│       ├── publish/         # Entwürfe -> GitHub-Commits + publish_history (je Datei, mit Retry + partial)
+│       ├── rollback/        # Wiederherstellung aus publish_history (je Datei geprüft, selektives Aufräumen)
+│       ├── blog/            # Blog-Artikel CRUD (Markdown im Repo, zod-validiert, mit Retry)
+│       ├── ai/chat/         # KI-Chat (Server-Feldliste, Gespräche an Ersteller gebunden)
+│       ├── ai/history/      # Letztes eigenes Gespräch + Nachrichten (mit Fehlerprüfung)
+│       ├── site/[siteId]/deploy-status/  # Echter Vercel-Aufbau-Status pro Commit-SHA
+│       ├── site/[siteId]/download-backup/  # Repo als .zip (Dateiname saniert)
+│       ├── admin/create-site/  # Site + Kunden-Nutzer anlegen (nur Admins, Service Role, Formatprüfung)
 │       ├── admin/delete-site/  # Site + CMS-Daten löschen (nur Admins, Rest per Cascade; Repo/Login bleiben)
 │       └── admin/toggle-ai/    # KI-Chat pro Site an/aus (nur Admins)
 ├── components/
-│   ├── editor/              # EditorClient, ImageField, HistoryDrawer, BlogPanel, BlogEditorModal
+│   ├── editor/              # EditorClient, StatusBadge, UndoButton, BannerCard, FieldEditor, ImageField, HistoryDrawer (Metadaten), BlogPanel (Paginiert), BlogEditorModal, ChatDrawer
 │   ├── DashboardClient.tsx, CreateSiteModal.tsx, LogoutButton.tsx
 ├── lib/
-│   ├── github.ts            # Octokit-Factory, Manifest laden/normalisieren, Repo-Dateien lesen (Base64 → UTF-8)
+│   ├── auth.ts              # Zentrale Zugriffsprüfung (requireSiteAccess, requireAdmin) für alle API-Routen
+│   ├── history.ts           # Verlauf-Snapshot mit files-Spalte + Fallbacks für alte Tabellen
+│   ├── github.ts            # Octokit-Factory, Manifest laden/normalisieren (+WithWarnings), Repo-Dateien lesen (Base64 → UTF-8), commitFileWithRetry (ein SHA-Retry), githubFehlerGrund (kundentauglich)
 │   ├── json-path.ts         # getByPath/setByPath (Dot-Paths, setByPath legt fehlende Ebenen an)
-│   ├── content-guard.ts     # Gemeinsame Inhaltsprüfung für Publish + Chat (Zielauflösung, Umwandlung, Banner, Listenmodelle, Kandidaten-Struktur)
+│   ├── content-guard.ts     # Barrel: re-exportiert content-guard/* (gleiche Namen, gleiche Funktionen)
+│   ├── content-guard/       # Aufgeteilte Inhaltsprüfung: base (Dateisperre/Ziele), banner, field-targets, free-drafts, list-models
 │   ├── ai-tools.ts          # KI-Werkzeuge (buildAiTools, testbar mit Adaptern; nutzt content-guard, speichert Entwürfe mit ehrlichen Hinweisen)
+│   ├── ai.ts                # KI-Modell, Datei-/Geheimnis-/Brücken-Regeln, System-Prompt (Budget + Nachladewege)
 │   ├── validate.ts          # Entwurfsprüfung (tolerante Strings) + strikte Endtypen (validateFinalJsonValue)
+│   ├── format.ts            # Gemeinsame Datumsanzeige (Verlauf + Blog)
 │   ├── slugify.ts           # Slug-Erzeugung für Blog-Artikel
 │   └── supabase/            # server.ts, client.ts, middleware.ts, admin.ts, config.ts
 └── types/cms.ts             # Zentrale Typen (Manifest, Blog, Site, Draft, PublishHistoryEntry, DraftMap)
+supabase/                   # ai-chat-schema.sql (KI-Tabellen), cms-rls-schema.sql (Mandanten-Trennung + Storage), cms-history-files-migration.sql (files-Spalte)
 ```
 
 Path-Alias: `@/*` → `src/*` (in `tsconfig.json`).
 
 ### Supabase-Datenbankschema
 
-Tabellen: `sites` (u. a. `preview_url`, `repo_owner`, `repo_name`), `user_sites` (Zuordnung Nutzer ↔ Site), `drafts` (unveröffentlichte Feldwerte, `unique (site_id, field_id)`), `publish_history` (Snapshots als JSONB-Payload, optional `note`-Spalte), `admins`. Row Level Security ist aktiviert; Nutzer dürfen nur Zeilen ihrer zugeordneten `site_id` sehen/ändern. Bilder aus `type: "image"`-Feldern werden clientseitig in den öffentlichen Storage-Bucket `cms-media` hochgeladen (Pfad: `sites/{siteId}/{timestamp}-{dateiname}`). Das vollständige SQL-Schema inkl. Storage-Policies steht in der `README.md`.
+Tabellen: `sites` (u. a. `preview_url`, `repo_owner`, `repo_name`, `ai_enabled`), `user_sites` (Zuordnung Nutzer ↔ Site), `drafts` (unveröffentlichte Feldwerte, `unique (site_id, field_id)`), `publish_history` (Snapshots als JSONB-Payload plus `files`-Dateiliste, optional `note`-Spalte), `admins`, dazu KI-Tabellen (`ai_conversations` mit `created_by`, `ai_messages`, `code_drafts`, `ai_usage`). Row Level Security ist Pflicht und liegt versioniert in `supabase/cms-rls-schema.sql` (Mandanten-Trennung + Storage-Ordnertrennung); Nutzer sehen/ändern nur Zeilen ihrer zugeordneten `site_id`. Bilder aus `type: "image"`-Feldern werden clientseitig in den öffentlichen Storage-Bucket `cms-media` hochgeladen (Pfad: `sites/{siteId}/{timestamp}-{dateiname}`, SVG abgelehnt; Schreiben nur im eigenen Site-Ordner). Das vollständige SQL-Schema inkl. Storage-Policies steht in der `README.md`, die Migrations-Skripte unter `supabase/`.
 
 ## Konventionen und Sicherheitsrichtlinien
 
-- **Zugriffsprüfung in jeder API-Route und geschützten Seite:** Session prüfen (`supabase.auth.getUser()`), dann Mitgliedschaft in `user_sites` für die angefragte `site_id`. Ohne Zuordnung: 401/403 bzw. `notFound()`. Dieses Muster bei neuen Endpunkten beibehalten (Referenz: `authorize()` in `src/app/api/blog/route.ts`).
+- **Zugriffsprüfung in jeder API-Route und geschützten Seite:** `requireSiteAccess(siteId)` bzw. `requireAdmin()` aus `src/lib/auth.ts` verwenden (Session → `user_sites` → Site; Admins via `admins`-Tabelle). Ohne Zuordnung: 401/403 bzw. `notFound()`. Dieses Muster bei neuen Endpunkten beibehalten.
 - **Service-Role-Key niemals clientseitig** verwenden; `createAdminClient()` nur in Admin-API-Routen und immer nach einem Admin-Check gegen die `admins`-Tabelle.
 - Fehlermeldungen an den Client auf Deutsch, mit passenden HTTP-Statuscodes; GitHub-Fehler werden in `publish`/`blog` als 502 weitergegeben, in `rollback` als 500.
 - Server Components laden Daten (Supabase + GitHub), interaktive Teile sind Client Components (`"use client"`).

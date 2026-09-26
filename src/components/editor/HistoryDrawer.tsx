@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { formatVerlaufsdatum as formatDate } from "@/lib/format";
 import { History, Loader2, RotateCcw, X } from "lucide-react";
 import type { PublishHistoryEntry } from "@/types/cms";
 
@@ -15,19 +16,6 @@ interface HistoryDrawerProps {
   refreshSignal: number;
 }
 
-function formatDate(iso: string): string {
-  const date = new Date(iso);
-  const day = date.toLocaleDateString("de-DE", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  });
-  const time = date.toLocaleTimeString("de-DE", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-  return `Version vom ${day}, ${time} Uhr`;
-}
 
 export function HistoryDrawer({
   siteId,
@@ -45,17 +33,54 @@ export function HistoryDrawer({
     setLoading(true);
     try {
       const supabase = createClient();
-      const { data, error } = await supabase
+      // W11: Nur Metadaten laden (keine schweren Payloads – die bleiben in
+      // der DB, bis eine Version wirklich zurückgerollt wird).
+      const meta = await supabase
         .from("publish_history")
-        .select("*")
+        .select("id,site_id,published_by,commit_sha,created_at,note,files")
         .eq("site_id", siteId)
-        .order("created_at", { ascending: false });
-
-      if (error) {
-        onError(`Verlauf konnte nicht geladen werden: ${error.message}`);
+        .order("created_at", { ascending: false })
+        .limit(100);
+      if (meta.error) {
+        // files-Spalte fehlt (Migration ausstehend)? Dann klassisch voll laden.
+        if (/files/i.test(meta.error.message)) {
+          const voll = await supabase
+            .from("publish_history")
+            .select("*")
+            .eq("site_id", siteId)
+            .order("created_at", { ascending: false });
+          if (voll.error) {
+            onError(`Verlauf konnte nicht geladen werden: ${voll.error.message}`);
+            return;
+          }
+          setEntries((voll.data ?? []) as PublishHistoryEntry[]);
+          return;
+        }
+        onError(`Verlauf konnte nicht geladen werden: ${meta.error.message}`);
         return;
       }
-      setEntries((data ?? []) as PublishHistoryEntry[]);
+      let rows = (meta.data ?? []) as PublishHistoryEntry[];
+      // Legacy-Einträge ohne files: Dateinamen gebündelt nachladen (ein Abruf).
+      const ohneDateien = rows.filter((r) => !Array.isArray(r.files));
+      if (ohneDateien.length > 0) {
+        const { data: payloads } = await supabase
+          .from("publish_history")
+          .select("id,payload")
+          .eq("site_id", siteId)
+          .in(
+            "id",
+            ohneDateien.map((r) => r.id)
+          );
+        const karten = new Map(
+          ((payloads ?? []) as Array<{ id: string; payload: Record<string, unknown> | null }>).map(
+            (p) => [p.id, Object.keys(p.payload ?? {})] as const
+          )
+        );
+        rows = rows.map((r) =>
+          Array.isArray(r.files) ? r : { ...r, files: karten.get(r.id) ?? [] }
+        );
+      }
+      setEntries(rows);
     } catch {
       onError("Verlauf konnte nicht geladen werden: Supabase nicht erreichbar.");
     } finally {
@@ -81,7 +106,13 @@ export function HistoryDrawer({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ siteId, historyId: entry.id }),
       });
-      const body = (await res.json()) as { error?: string; message?: string };
+      const body = (await res.json()) as {
+        error?: string;
+        message?: string;
+        partial?: boolean;
+        failed?: Array<{ file: string; error: string }>;
+        blocked?: Array<{ file: string; errors: string[] }>;
+      };
 
       if (!res.ok) {
         onError(body.error ?? "Wiederherstellung fehlgeschlagen.");
@@ -89,13 +120,19 @@ export function HistoryDrawer({
         return;
       }
 
-      onSuccess(body.message ?? "Version wurde erfolgreich wiederhergestellt.");
+      const heldBack = [
+        ...(body.blocked ?? []).flatMap((b) => (b.errors ?? []).map((e) => `${b.file}: ${e}`)),
+        ...(body.failed ?? []).map((f) => `${f.file}: ${f.error}`),
+      ];
+      onSuccess(
+        body.partial && heldBack.length > 0
+          ? `${body.message ?? "Teils wiederhergestellt."} Zurückgehalten: ${heldBack.join("; ")}`
+          : (body.message ?? "Version wurde erfolgreich wiederhergestellt.")
+      );
 
-      // Harter Browser-Reload, damit React Formularfelder und Iframe
-      // komplett neu initialisiert (kein router.refresh()!)
-      window.setTimeout(() => {
-        window.location.reload();
-      }, 900);
+      // W6: Kein harter Reload mehr – der Editor lädt Serverdaten neu und
+      // setzt das Formular weich zurück (siehe onSuccess beim Aufrufer).
+      setRestoringId(null);
     } catch {
       onError("Server nicht erreichbar. Bitte später erneut versuchen.");
       setRestoringId(null);
@@ -147,7 +184,7 @@ export function HistoryDrawer({
 
           <ul className="space-y-3">
             {entries.map((entry) => {
-              const files = Object.keys(entry.payload ?? {});
+              const files = entry.files ?? Object.keys(entry.payload ?? {});
               const note = entry.note ?? null;
               return (
               <li

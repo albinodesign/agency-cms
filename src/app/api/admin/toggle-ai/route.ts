@@ -1,38 +1,13 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { requireAdmin } from "@/lib/auth";
 
 /** Schaltet den KI-Chat einer Website an/aus (nur Agentur-Admins). */
 export async function POST(request: Request) {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json({ error: "Nicht authentifiziert." }, { status: 401 });
-    }
-
-    let supabaseAdmin;
-    try {
-      supabaseAdmin = createAdminClient();
-    } catch (err) {
-      return NextResponse.json(
-        { error: err instanceof Error ? err.message : "Server-Konfiguration fehlt." },
-        { status: 500 }
-      );
-    }
-
-    const { data: adminRow } = await supabaseAdmin
-      .from("admins")
-      .select("user_id")
-      .eq("user_id", user.id)
-      .maybeSingle();
-
-    if (!adminRow) {
-      return NextResponse.json({ error: "Keine Admin-Berechtigung." }, { status: 403 });
-    }
+    // Admin-Prüfung (zentral: Session + admins-Tabelle, src/lib/auth.ts)
+    const access = await requireAdmin();
+    if (!access.ok) return access.error;
+    const { supabaseAdmin } = access;
 
     let body: { siteId?: string; enabled?: boolean };
     try {
@@ -51,8 +26,9 @@ export async function POST(request: Request) {
       .eq("id", body.siteId);
 
     if (error) {
+      console.error("toggle-ai fehlgeschlagen:", error.message);
       return NextResponse.json(
-        { error: `Schalter konnte nicht umgelegt werden: ${error.message}` },
+        { error: "Schalter konnte nicht umgelegt werden. Details stehen im Server-Protokoll." },
         { status: 500 }
       );
     }

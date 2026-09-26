@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import { createOctokit, getManifestRaw, getRepoFile, normalizeManifest } from "@/lib/github";
+import { requireSiteAccess } from "@/lib/auth";
+import { beschraenkeVerlauf, insertPublishHistory } from "@/lib/history";
+import {
+  commitFileWithRetry,
+  createOctokit,
+  getManifestRaw,
+  getRepoFile,
+  normalizeManifest,
+} from "@/lib/github";
 import { getBySegments, parsePathSafe, setByPath } from "@/lib/json-path";
 import { validateDraftValue, validateFinalJsonValue } from "@/lib/validate";
 import {
@@ -12,6 +19,7 @@ import {
   getBannerProblems,
   isAllowedFieldJsonFile,
   makeCoveragePredicate,
+  modelleAusManifest,
   parseFreeDraftIdSafe,
   resolveEditType,
   validateBannerValue,
@@ -30,7 +38,7 @@ import {
   isAllowedContentPath,
   validateManifestText,
 } from "@/lib/ai";
-import type { CodeDraft, Draft, Site } from "@/types/cms";
+import type { CodeDraft, Draft } from "@/types/cms";
 import { FREE_DRAFT_PREFIX } from "@/types/cms";
 
 const COMMIT_MESSAGE = "cms: update content by client";
@@ -44,17 +52,122 @@ interface FileEdit {
   label: string;
 }
 
+interface CommitPhaseErgebnis {
+  committedFiles: string[];
+  committedFields: string[];
+  committedDraftIds: string[];
+  publishedFieldIds: string[];
+  commitFailed: Array<{ file: string; error: string }>;
+  lastCommitSha: string | null;
+}
+
+/**
+ * Phase „Commit" (W3): Schreibt alle geprüften Dateien je einzeln auf main.
+ * Schlägt ein Commit fehl, laufen die übrigen weiter (Teilveröffentlichung);
+ * bei SHA-Konflikt greift commitFileWithRetry (ein Retry mit frischem SHA).
+ * Fehlgeschlagene Dateien werden aus payload/finalContent entfernt.
+ */
+async function committeGepruefteDateien(args: {
+  octokit: ReturnType<typeof createOctokit>;
+  owner: string;
+  repo: string;
+  finalContent: Map<string, { text: string; kind: "json" | "text" }>;
+  baseFiles: Map<string, { text: string; sha: string }>;
+  editsByFile: Map<string, FileEdit[]>;
+  payload: Record<string, Record<string, unknown>>;
+}): Promise<CommitPhaseErgebnis> {
+  const { octokit, owner, repo, finalContent, baseFiles, editsByFile, payload } = args;
+  const committedFiles: string[] = [];
+  const committedFields: string[] = [];
+  const committedDraftIds: string[] = [];
+  const publishedFieldIds: string[] = [];
+  const commitFailed: Array<{ file: string; error: string }> = [];
+  let lastCommitSha: string | null = null;
+
+  for (const [filePath, final] of finalContent) {
+    const base = baseFiles.get(filePath)!;
+    const result = await commitFileWithRetry(
+      octokit,
+      owner,
+      repo,
+      COMMIT_MESSAGE,
+      { file: filePath, text: final.text, sha: base.sha },
+      async () => {
+        const fresh = await getRepoFile(octokit, owner, repo, filePath);
+        baseFiles.set(filePath, { text: fresh.text, sha: fresh.sha });
+        return fresh.sha;
+      }
+    );
+    if (!result.ok) {
+      commitFailed.push({ file: filePath, error: result.error });
+      delete payload[filePath];
+      finalContent.delete(filePath);
+      continue;
+    }
+    lastCommitSha = result.sha;
+    if (final.kind === "text") {
+      // Text-Dateien als Rohtext sichern (für echtes Wiederherstellen)
+      payload[filePath] = { __text: final.text };
+    }
+    committedFiles.push(filePath);
+    const edits = editsByFile.get(filePath) ?? [];
+    committedFields.push(...edits.map((e) => e.label));
+    committedDraftIds.push(...edits.map((e) => e.draftId));
+    publishedFieldIds.push(...edits.map((e) => e.fieldId));
+  }
+
+  return { committedFiles, committedFields, committedDraftIds, publishedFieldIds, commitFailed, lastCommitSha };
+}
+
+/**
+ * Phase „Antwort" (W3): Baut die ehrliche Erfolgsmeldung – unterscheidet
+ * klar zwischen vollständig und teils veröffentlicht (partial/failed).
+ */
+function baueErfolgsantwort(args: {
+  committedFiles: string[];
+  committedFields: string[];
+  publishedFieldIds: string[];
+  blocked: Map<string, string[]>;
+  commitFailed: Array<{ file: string; error: string }>;
+  skipped: string[];
+  cleanedAliases: number;
+  lastCommitSha: string | null;
+}) {
+  const { committedFiles, committedFields, publishedFieldIds, blocked, commitFailed, skipped, cleanedAliases, lastCommitSha } = args;
+  const skippedNote =
+    skipped.length > 0
+      ? ` ${skipped.length} Eintrag/Einträge ohne Zuordnung wurden übersprungen.`
+      : "";
+  const aliasNote =
+    cleanedAliases > 0
+      ? ` Gleichwertige Dubletten wurden mit aufgeräumt (${cleanedAliases}).`
+      : "";
+  const blockedList = [...blocked.entries()].map(([file, errors]) => ({ file, errors }));
+  const blockedNote =
+    blockedList.length > 0
+      ? ` Zurückgehalten: ${blockedList.map((b) => `${b.file} (${b.errors[0]})`).join("; ")}.`
+      : "";
+  const failedNote =
+    commitFailed.length > 0
+      ? ` Fehlgeschlagen: ${commitFailed.map((f) => `${f.file} (${f.error})`).join("; ")}.`
+      : "";
+  return {
+    message: `${committedFiles.length} Datei(en) veröffentlicht.${skippedNote}${aliasNote}${blockedNote}${failedNote}`,
+    publishedFields: committedFields,
+    publishedFiles: committedFiles,
+    publishedFieldIds,
+    blocked: blockedList,
+    failed: commitFailed,
+    // Ehrliche Unterscheidung – true, sobald etwas zurückgehalten wurde
+    // oder Commits fehlschlugen (Client zeigt dann Warnung statt Jubel).
+    partial: blockedList.length > 0 || commitFailed.length > 0,
+    // Echter Versions-Stempel für den Aufbau-Check (Vercel meldet den Bau-Status daran)
+    commitSha: lastCommitSha,
+  };
+}
+
 export async function POST(request: Request) {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json({ error: "Nicht authentifiziert." }, { status: 401 });
-    }
-
     let body: { siteId?: string };
     try {
       body = await request.json();
@@ -62,34 +175,13 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Ungültiger Request-Body." }, { status: 400 });
     }
 
-    const siteId = body.siteId;
-    if (!siteId || typeof siteId !== "string") {
-      return NextResponse.json({ error: "siteId fehlt." }, { status: 400 });
-    }
+    // Zugriff prüfen (zentral: Session + user_sites + Site, src/lib/auth.ts)
+    const access = await requireSiteAccess(body.siteId);
+    if (!access.ok) return access.error;
+    const { supabase, user, site } = access;
 
-    // Zugriff prüfen
-    const { data: assignment } = await supabase
-      .from("user_sites")
-      .select("site_id")
-      .eq("user_id", user.id)
-      .eq("site_id", siteId)
-      .maybeSingle();
-
-    if (!assignment) {
-      return NextResponse.json({ error: "Kein Zugriff auf diese Website." }, { status: 403 });
-    }
-
-    const { data: site, error: siteError } = await supabase
-      .from("sites")
-      .select("*")
-      .eq("id", siteId)
-      .single();
-
-    if (siteError || !site) {
-      return NextResponse.json({ error: "Website nicht gefunden." }, { status: 404 });
-    }
-
-    const typedSite = site as Site;
+    const siteId = site.id;
+    const typedSite = site;
 
     // Alle Entwürfe dieser Site laden (Formular + freie KI-Pfade)
     const { data: drafts, error: draftsError } = await supabase
@@ -98,14 +190,27 @@ export async function POST(request: Request) {
       .eq("site_id", siteId);
 
     if (draftsError) {
+      console.error("Publish: drafts laden fehlgeschlagen:", draftsError.message);
       return NextResponse.json(
-        { error: `Entwürfe konnten nicht geladen werden: ${draftsError.message}` },
+        { error: "Entwürfe konnten nicht geladen werden. Details stehen im Server-Protokoll." },
         { status: 500 }
       );
     }
 
-    // Code-Entwürfe laden (Design, Feldliste, Blog – alles volle Dateien)
-    const { data: codeRows } = await supabase.from("code_drafts").select("*").eq("site_id", siteId);
+    // Code-Entwürfe laden (Design, Feldliste, Blog – alles volle Dateien).
+    // Ein Datenbankfehler darf hier nicht still als „keine Code-Drafts"
+    // gewertet werden – sonst gingen Entwürfe unbemerkt verloren.
+    const { data: codeRows, error: codeRowsError } = await supabase
+      .from("code_drafts")
+      .select("*")
+      .eq("site_id", siteId);
+    if (codeRowsError) {
+      console.error("Publish: code_drafts laden fehlgeschlagen:", codeRowsError.message);
+      return NextResponse.json(
+        { error: "Code-Entwürfe konnten nicht geladen werden. Details stehen im Server-Protokoll." },
+        { status: 500 }
+      );
+    }
     const codeDrafts = (codeRows ?? []) as CodeDraft[];
 
     const typedDrafts = (drafts ?? []) as Draft[];
@@ -161,6 +266,17 @@ export async function POST(request: Request) {
       );
     }
 
+    // W17: Listenmodelle aus Standard + effektivem Manifest (deklarativ statt
+    // hardcodiert). Fehlerhafte Modell-Deklarationen brechen den ganzen Satz
+    // ab – die gemeinsame Grundlage wäre sonst unklar.
+    const { modelle: listenModelle, fehler: modellFehler } = modelleAusManifest(effectiveNormalized);
+    if (modellFehler.length > 0) {
+      return NextResponse.json(
+        { error: `Bitte korrigiere zuerst die Listenmodelle im Manifest (es wurde nichts veröffentlicht, Entwürfe bleiben erhalten):\n- ${modellFehler.join("\n- ")}` },
+        { status: 400 }
+      );
+    }
+
     // Aufgelöste Zieltypen je kanonischem Ziel (einheitlich für Manifestfeld,
     // freien Alias und vollständige Datei-Inhalte – dieselbe Auflösung wie im
     // Chat; ein Alias erbt Typ, Länge und Label des Felds).
@@ -187,7 +303,8 @@ export async function POST(request: Request) {
         pp.segments,
         `${file}#${pp.canonical}`,
         typeMap,
-        parsedJson.get(file)
+        parsedJson.get(file),
+        listenModelle
       );
       return {
         type: r.type,
@@ -389,12 +506,10 @@ export async function POST(request: Request) {
     // Neben den Entwurfs-Dateien werden alle erlaubten Manifestdateien geladen,
     // damit die Pfad-Existenz jedes Felds prüfbar ist. Unerlaubte Manifestziele
     // werden gar nicht erst aus dem Repo gelesen (sie landen als Fehler unten).
-    const committedFields: string[] = [];
-    const committedDraftIds: string[] = [];
-    const committedFiles: string[] = [];
-    const publishedFieldIds: string[] = [];
+    // (commit-Ergebnisse liefert die Commit-Phase unten; payload sammelt History.)
+    // (commit-Ergebnisse inkl. lastCommitSha liefert die Commit-Phase unten;
+    // payload sammelt den History-Snapshot.)
     const payload: Record<string, Record<string, unknown>> = {};
-    let lastCommitSha: string | null = null;
 
     const loadFiles = new Set<string>();
     for (const entry of extractRawFields(effectiveManifestRaw)) {
@@ -519,7 +634,7 @@ export async function POST(request: Request) {
       for (const edit of fileEdits) {
         const label = resolveEdit(filePath, edit.path, edit.fieldId).label;
         try {
-          setByPath(cand, edit.path, convertEditValue(filePath, edit.path, edit.value, typeMap, parsedJson.get(filePath)));
+          setByPath(cand, edit.path, convertEditValue(filePath, edit.path, edit.value, typeMap, parsedJson.get(filePath), listenModelle));
         } catch (err) {
           block(
             filePath,
@@ -532,7 +647,7 @@ export async function POST(request: Request) {
     // Strenge Prüfung je ANGEFASSTER Datei (Mittelweg: Unberührtes blockiert
     // nichts mehr): effektives Manifest, strikte Endtypen, Banner-Endstand,
     // Listen-Strukturen und Typtreue – jeweils nur dort, wo der Satz schreibt.
-    const isCovered = makeCoveragePredicate(typeMap);
+    const isCovered = makeCoveragePredicate(typeMap, listenModelle);
     const touchedJsonFiles = new Set<string>();
     for (const [filePath] of editsByFile) {
       if (candidateJson.has(filePath)) touchedJsonFiles.add(filePath);
@@ -576,7 +691,7 @@ export async function POST(request: Request) {
       // Listen + Typtreue dieser Datei.
       const liveM = new Map([[filePath, live]]);
       const candM = new Map([[filePath, cand]]);
-      for (const e of validateListStructures(liveM, candM, isCovered)) block(filePath, e);
+      for (const e of validateListStructures(liveM, candM, isCovered, listenModelle)) block(filePath, e);
       for (const e of validateScalarTypePreservation(liveM, candM, isCovered)) block(filePath, e);
     }
 
@@ -621,60 +736,42 @@ export async function POST(request: Request) {
     }
 
     // Phase 2: jetzt erst committen (alles wurde oben je Datei geprüft).
-    // Schlägt ein Commit fehl, laufen die übrigen weiter (Teilveröffentlichung).
-    const commitFailed: Array<{ file: string; error: string }> = [];
-    for (const [filePath, final] of finalContent) {
-      const base = baseFiles.get(filePath)!;
-      try {
-        const { data: commitData } = await octokit.repos.createOrUpdateFileContents({
-          owner: typedSite.repo_owner,
-          repo: typedSite.repo_name,
-          path: filePath,
-          message: COMMIT_MESSAGE,
-          content: Buffer.from(final.text, "utf-8").toString("base64"),
-          ...(base.sha ? { sha: base.sha } : {}),
-          branch: "main",
-        });
-        lastCommitSha = commitData.commit.sha ?? null;
-      } catch (err) {
-        commitFailed.push({
-          file: filePath,
-          error: `GitHub-Commit für "${filePath}" fehlgeschlagen: ${
-            err instanceof Error ? err.message : "Unbekannter Fehler"
-          }`,
-        });
-        delete payload[filePath];
-        finalContent.delete(filePath);
-        continue;
-      }
-      if (final.kind === "text") {
-        // Text-Dateien als Rohtext sichern (für echtes Wiederherstellen)
-        payload[filePath] = { __text: final.text };
-      }
-      committedFiles.push(filePath);
-      const edits = editsByFile.get(filePath) ?? [];
-      committedFields.push(...edits.map((e) => e.label));
-      committedDraftIds.push(...edits.map((e) => e.draftId));
-      publishedFieldIds.push(...edits.map((e) => e.fieldId));
-    }
-
-    // Snapshot in publish_history speichern (vollständiger Stand pro Datei)
-    const { error: historyError } = await supabase.from("publish_history").insert({
-      site_id: siteId,
-      published_by: user.id ?? null,
-      commit_sha: lastCommitSha,
+    const commit = await committeGepruefteDateien({
+      octokit,
+      owner: typedSite.repo_owner,
+      repo: typedSite.repo_name,
+      finalContent,
+      baseFiles,
+      editsByFile,
       payload,
     });
+    const { committedFiles, committedFields, committedDraftIds, publishedFieldIds, commitFailed, lastCommitSha } = commit;
+
+    // Snapshot in publish_history speichern (vollständiger Stand pro Datei,
+    // plus Dateiliste für schlankes Laden – mit Fallbacks, src/lib/history.ts)
+    const { error: historyError } = await insertPublishHistory(
+      supabase,
+      {
+        site_id: siteId,
+        published_by: user.id ?? null,
+        commit_sha: lastCommitSha,
+        payload,
+      },
+      committedFiles
+    );
 
     if (historyError) {
-      console.error("publish_history insert fehlgeschlagen:", historyError);
+      console.error("publish_history insert endgültig fehlgeschlagen.");
       return NextResponse.json(
         {
-          error: `Die Änderungen wurden zu GitHub übertragen, aber der Verlaufseintrag konnte nicht gespeichert werden: ${historyError.message}`,
+          error: "Die Änderungen wurden zu GitHub übertragen, aber der Verlaufseintrag konnte nicht gespeichert werden. Details stehen im Server-Protokoll.",
         },
         { status: 500 }
       );
     }
+
+    // W18: Verlauf schlank halten (neueste 50 je Site, Fehler nur loggen)
+    await beschraenkeVerlauf(supabase, siteId);
 
     console.log(
       `publish_history: Eintrag für Site ${siteId} gespeichert (Commit ${lastCommitSha ?? "unbekannt"}, ${committedFiles.length} Datei(en))`
@@ -711,55 +808,43 @@ export async function POST(request: Request) {
     const publishedAliases = fulfilledAliases.filter((a) => committedFiles.includes(a.file));
     if (publishedAliases.length > 0) {
       const aliasIds = publishedAliases.map((a) => a.id);
-      const { data: aliasRows } = await supabase
+      // W12: Lesefehler hier nicht verschweigen – Aufräumen auslassen, Publish gilt trotzdem.
+      const { data: aliasRows, error: aliasReadError } = await supabase
         .from("drafts")
         .select("id,value")
         .eq("site_id", siteId)
         .in("id", aliasIds);
-      const stillSame = ((aliasRows ?? []) as Array<{ id: string; value: string }>)
-        .filter((row) => publishedAliases.some((a) => a.id === row.id && a.value === row.value))
-        .map((row) => row.id);
-      if (stillSame.length > 0) {
-        const { error: aliasDeleteError } = await supabase
-          .from("drafts")
-          .delete()
-          .eq("site_id", siteId)
-          .in("id", stillSame);
-        if (aliasDeleteError) {
-          console.error("alias drafts delete fehlgeschlagen:", aliasDeleteError.message);
-        } else {
-          cleanedAliases = stillSame.length;
+      if (aliasReadError) {
+        console.error("alias drafts lesen fehlgeschlagen:", aliasReadError.message);
+      } else {
+        const stillSame = ((aliasRows ?? []) as Array<{ id: string; value: string }>)
+          .filter((row) => publishedAliases.some((a) => a.id === row.id && a.value === row.value))
+          .map((row) => row.id);
+        if (stillSame.length > 0) {
+          const { error: aliasDeleteError } = await supabase
+            .from("drafts")
+            .delete()
+            .eq("site_id", siteId)
+            .in("id", stillSame);
+          if (aliasDeleteError) {
+            console.error("alias drafts delete fehlgeschlagen:", aliasDeleteError.message);
+          } else {
+            cleanedAliases = stillSame.length;
+          }
         }
       }
     }
 
-    const skippedNote =
-      skipped.length > 0
-        ? ` ${skipped.length} Eintrag/Einträge ohne Zuordnung wurden übersprungen.`
-        : "";
-    const aliasNote =
-      cleanedAliases > 0
-        ? ` Gleichwertige Dubletten wurden mit aufgeräumt (${cleanedAliases}).`
-        : "";
-    const blockedList = [...blocked.entries()].map(([file, errors]) => ({ file, errors }));
-    const blockedNote =
-      blockedList.length > 0
-        ? ` Zurückgehalten: ${blockedList.map((b) => `${b.file} (${b.errors[0]})`).join("; ")}.`
-        : "";
-    const failedNote =
-      commitFailed.length > 0
-        ? ` Fehlgeschlagen: ${commitFailed.map((f) => `${f.file} (${f.error})`).join("; ")}.`
-        : "";
-
-    return NextResponse.json({
-      message: `${committedFiles.length} Datei(en) veröffentlicht.${skippedNote}${aliasNote}${blockedNote}${failedNote}`,
-      publishedFields: committedFields,
-      publishedFiles: committedFiles,
+    return NextResponse.json(baueErfolgsantwort({
+      committedFiles,
+      committedFields,
       publishedFieldIds,
-      blocked: blockedList,
-      // Echter Versions-Stempel für den Aufbau-Check (Vercel meldet den Bau-Status daran)
-      commitSha: lastCommitSha,
-    });
+      blocked,
+      commitFailed,
+      skipped,
+      cleanedAliases,
+      lastCommitSha,
+    }));
   } catch (err) {
     console.error("Publish fehlgeschlagen:", err);
     return NextResponse.json(

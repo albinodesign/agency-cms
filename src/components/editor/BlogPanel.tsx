@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { BlogEditorModal } from "@/components/editor/BlogEditorModal";
+import { formatKurzdatum as formatDate } from "@/lib/format";
 import {
   FileText,
   Loader2,
@@ -22,16 +23,9 @@ interface EditorState {
   content: string;
 }
 
-function formatDate(iso: string): string {
-  if (!iso) return "—";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleDateString("de-DE", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  });
-}
+
+/** Beiträge pro Seite in der Übersicht (W11: flüssig auch bei vielen Artikeln). */
+const POSTS_PER_PAGE = 20;
 
 export function BlogPanel({ siteId, onError, onSuccess }: BlogPanelProps) {
   const [posts, setPosts] = useState<BlogPost[]>([]);
@@ -39,6 +33,11 @@ export function BlogPanel({ siteId, onError, onSuccess }: BlogPanelProps) {
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [editorLoading, setEditorLoading] = useState(false);
   const [deletingPath, setDeletingPath] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
+
+  const pageCount = Math.max(1, Math.ceil(posts.length / POSTS_PER_PAGE));
+  const safePage = Math.min(page, pageCount - 1);
+  const visiblePosts = posts.slice(safePage * POSTS_PER_PAGE, safePage * POSTS_PER_PAGE + POSTS_PER_PAGE);
 
   const loadPosts = useCallback(async () => {
     setLoading(true);
@@ -50,6 +49,7 @@ export function BlogPanel({ siteId, onError, onSuccess }: BlogPanelProps) {
         return;
       }
       setPosts(body.posts ?? []);
+      setPage(0);
     } catch {
       onError("Server nicht erreichbar. Blog-Artikel konnten nicht geladen werden.");
     } finally {
@@ -152,7 +152,7 @@ export function BlogPanel({ siteId, onError, onSuccess }: BlogPanelProps) {
       )}
 
       <ul className="space-y-3">
-        {posts.map((post) => (
+        {visiblePosts.map((post) => (
           <li
             key={post.path}
             className="flex items-center gap-4 rounded-xl border border-zinc-200 bg-white p-4"
@@ -162,6 +162,7 @@ export function BlogPanel({ siteId, onError, onSuccess }: BlogPanelProps) {
               <img
                 src={post.coverImage}
                 alt={post.title}
+                loading="lazy"
                 className="h-14 w-14 shrink-0 rounded-lg border border-zinc-200 object-cover"
               />
             ) : (
@@ -218,6 +219,30 @@ export function BlogPanel({ siteId, onError, onSuccess }: BlogPanelProps) {
           </li>
         ))}
       </ul>
+
+      {pageCount > 1 && (
+        <div className="mt-4 flex items-center justify-between">
+          <button
+            type="button"
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+            disabled={safePage === 0}
+            className="rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50"
+          >
+            ← Zurück
+          </button>
+          <p className="text-xs text-zinc-500">
+            Seite {safePage + 1} von {pageCount} ({posts.length} Artikel)
+          </p>
+          <button
+            type="button"
+            onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+            disabled={safePage >= pageCount - 1}
+            className="rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50"
+          >
+            Weiter →
+          </button>
+        </div>
+      )}
 
       {editor && (
         <BlogEditorModal

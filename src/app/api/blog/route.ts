@@ -1,12 +1,76 @@
 import { NextResponse } from "next/server";
 import matter from "gray-matter";
-import { createClient } from "@/lib/supabase/server";
-import { createOctokit } from "@/lib/github";
+import { z } from "zod";
+import { requireSiteAccess } from "@/lib/auth";
+import { createOctokit, githubFehlerGrund, isShaConflictError } from "@/lib/github";
 import { slugify } from "@/lib/slugify";
-import type { BlogPost, Site } from "@/types/cms";
+import type { BlogPost } from "@/types/cms";
 import type { Octokit } from "@octokit/rest";
 
 const BLOG_DIR = "src/content/blog";
+
+/** W9: Frontmatter-Grenzen – nichts Riesiges, nichts Skriptartiges. */
+const MAX_BLOG_TITLE = 200;
+const MAX_BLOG_EXCERPT = 500;
+const MAX_BLOG_ALT = 200;
+const MAX_BLOG_CONTENT = 100_000;
+
+/** https-Adresse oder interne/relative Bildreferenz (niemals javascript:/data:). */
+const coverImageSchema = z
+  .string()
+  .max(2000, "Das Beitragsbild ist zu lang (max. 2000 Zeichen).")
+  .refine(
+    (v) => {
+      const t = v.trim();
+      if (t === "") return true;
+      try {
+        const url = new URL(t);
+        return url.protocol === "https:" || url.protocol === "http:";
+      } catch {
+        return (
+          t.startsWith("/") &&
+          !t.startsWith("//") &&
+          !t.includes("..") &&
+          !/["'<>\\\s]/.test(t)
+        );
+      }
+    },
+    "Das Beitragsbild muss eine http(s)-Adresse oder ein interner Pfad (/bilder/…) sein."
+  );
+
+const blogFrontmatterSchema = z.object({
+  title: z
+    .string("Titel fehlt.")
+    .trim()
+    .min(1, "Titel fehlt.")
+    .max(MAX_BLOG_TITLE, `Der Titel ist zu lang (max. ${MAX_BLOG_TITLE} Zeichen).`),
+  date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "Das Datum braucht das Format JJJJ-MM-TT.")
+    .refine((v) => !Number.isNaN(Date.parse(v)), "Das Datum ist kein gültiges Kalenderdatum.")
+    .optional(),
+  coverImage: coverImageSchema.optional().default(""),
+  coverImageAlt: z
+    .string()
+    .max(MAX_BLOG_ALT, `Der Bild-Alt-Text ist zu lang (max. ${MAX_BLOG_ALT} Zeichen).`)
+    .optional()
+    .default(""),
+  excerpt: z
+    .string()
+    .max(MAX_BLOG_EXCERPT, `Die Kurzbeschreibung ist zu lang (max. ${MAX_BLOG_EXCERPT} Zeichen).`)
+    .optional()
+    .default(""),
+  draft: z.boolean().optional().default(false),
+});
+
+const blogPostSchema = z.object({
+  frontmatter: blogFrontmatterSchema,
+  content: z
+    .string()
+    .max(MAX_BLOG_CONTENT, "Der Artikeltext ist zu lang (max. 100.000 Zeichen).")
+    .optional()
+    .default(""),
+});
 
 /** Strikte Pfad-Whitelist: nur src/content/blog/<slug>.md mit [a-z0-9-] im Dateinamen. */
 const VALID_BLOG_PATH = /^src\/content\/blog\/[a-z0-9-]+\.md$/;
@@ -15,44 +79,8 @@ function isValidBlogPath(path: string): boolean {
   return !path.includes("..") && VALID_BLOG_PATH.test(path);
 }
 
-/** Session + Site-Zugriff prüfen, liefert die Site oder eine Fehler-Response. */
-async function authorize(siteId: string | null) {
-  if (!siteId) {
-    return { error: NextResponse.json({ error: "siteId fehlt." }, { status: 400 }) };
-  }
-
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    return { error: NextResponse.json({ error: "Nicht authentifiziert." }, { status: 401 }) };
-  }
-
-  const { data: assignment } = await supabase
-    .from("user_sites")
-    .select("site_id")
-    .eq("user_id", user.id)
-    .eq("site_id", siteId)
-    .maybeSingle();
-
-  if (!assignment) {
-    return { error: NextResponse.json({ error: "Kein Zugriff auf diese Website." }, { status: 403 }) };
-  }
-
-  const { data: site, error: siteError } = await supabase
-    .from("sites")
-    .select("*")
-    .eq("id", siteId)
-    .single();
-
-  if (siteError || !site) {
-    return { error: NextResponse.json({ error: "Website nicht gefunden." }, { status: 404 }) };
-  }
-
-  return { site: site as Site };
-}
+/** Session + Site-Zugriff prüfen (zentral in src/lib/auth.ts). */
+const authorize = requireSiteAccess;
 
 function isNotFound(err: unknown): boolean {
   return (
@@ -133,7 +161,7 @@ export async function GET(request: Request) {
   const path = searchParams.get("path");
 
   const auth = await authorize(siteId);
-  if ("error" in auth) return auth.error;
+  if (!auth.ok) return auth.error;
 
   try {
     const octokit = createOctokit();
@@ -167,7 +195,7 @@ export async function GET(request: Request) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("Blog-Liste fehlgeschlagen:", message);
     return NextResponse.json(
-      { error: `Blog-Artikel konnten nicht geladen werden: ${message}` },
+      { error: "Blog-Artikel konnten nicht geladen werden. Details stehen im Server-Protokoll." },
       { status: 502 }
     );
   }
@@ -194,7 +222,7 @@ export async function POST(request: Request) {
   }
 
   const auth = await authorize(body.siteId ?? null);
-  if ("error" in auth) return auth.error;
+  if (!auth.ok) return auth.error;
 
   const slug = slugify(body.slug ?? "");
   if (!slug) {
@@ -202,21 +230,38 @@ export async function POST(request: Request) {
   }
 
   const fm = body.frontmatter ?? {};
-  if (!fm.title?.trim()) {
+  // W9: Eingaben erst auf Strings normieren (falsche Typen → deutsche
+  // Meldung statt englischem Zod-Standardtext), dann streng validieren.
+  const normiert = {
+    title: typeof fm.title === "string" ? fm.title : "",
+    date: typeof fm.date === "string" ? fm.date : undefined,
+    coverImage: typeof fm.coverImage === "string" ? fm.coverImage : "",
+    coverImageAlt: typeof fm.coverImageAlt === "string" ? fm.coverImageAlt : "",
+    excerpt: typeof fm.excerpt === "string" ? fm.excerpt : "",
+    draft: fm.draft === true,
+  };
+  const inhalt = typeof body.content === "string" ? body.content : "";
+  const parsed = blogPostSchema.safeParse({ frontmatter: normiert, content: inhalt });
+  if (!parsed.success) {
+    const first = parsed.error.issues[0];
+    return NextResponse.json({ error: first?.message ?? "Blog-Daten ungültig." }, { status: 400 });
+  }
+  const valid = parsed.data;
+  if (!valid.frontmatter.title.trim()) {
     return NextResponse.json({ error: "Titel fehlt." }, { status: 400 });
   }
 
   const frontmatter = {
-    title: fm.title.trim(),
+    title: valid.frontmatter.title.trim(),
     slug,
-    date: fm.date || new Date().toISOString().slice(0, 10),
-    coverImage: fm.coverImage ?? "",
-    coverImageAlt: fm.coverImageAlt || fm.title || "",
-    excerpt: fm.excerpt ?? "",
-    draft: fm.draft === true,
+    date: valid.frontmatter.date || new Date().toISOString().slice(0, 10),
+    coverImage: valid.frontmatter.coverImage ?? "",
+    coverImageAlt: valid.frontmatter.coverImageAlt || valid.frontmatter.title || "",
+    excerpt: valid.frontmatter.excerpt ?? "",
+    draft: valid.frontmatter.draft === true,
   };
 
-  const markdown = matter.stringify(`\n${body.content ?? ""}\n`, frontmatter);
+  const markdown = matter.stringify(`\n${valid.content ?? ""}\n`, frontmatter);
   const filePath = `${BLOG_DIR}/${slug}.md`;
 
   // Defense in Depth: der erzeugte Pfad muss dem Blog-Pfad-Schema entsprechen
@@ -243,15 +288,42 @@ export async function POST(request: Request) {
       if (!isNotFound(err)) throw err;
     }
 
-    const { data: commitData } = await octokit.repos.createOrUpdateFileContents({
-      owner: auth.site.repo_owner,
-      repo: auth.site.repo_name,
-      path: filePath,
-      message: `cms: save blog post ${slug}`,
-      content: Buffer.from(markdown, "utf-8").toString("base64"),
-      sha,
-      branch: "main",
-    });
+    // W13: Bei Versionskonflikt (paralleles Speichern) einmal mit frischem
+    // SHA erneut versuchen, statt sofort aufzugeben.
+    let commitData;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const res = await octokit.repos.createOrUpdateFileContents({
+          owner: auth.site.repo_owner,
+          repo: auth.site.repo_name,
+          path: filePath,
+          message: `cms: save blog post ${slug}`,
+          content: Buffer.from(markdown, "utf-8").toString("base64"),
+          sha,
+          branch: "main",
+        });
+        commitData = res.data;
+        break;
+      } catch (err) {
+        if (attempt === 0 && isShaConflictError(err)) {
+          try {
+            const { data } = await octokit.repos.getContent({
+              owner: auth.site.repo_owner,
+              repo: auth.site.repo_name,
+              path: filePath,
+              ref: "main",
+            });
+            if (!Array.isArray(data) && data.type === "file") {
+              sha = data.sha;
+              continue;
+            }
+          } catch {
+            // Frisches Laden scheiterte – unten als Fehler melden
+          }
+        }
+        throw err;
+      }
+    }
 
     return NextResponse.json({
       message: sha
@@ -259,15 +331,14 @@ export async function POST(request: Request) {
         : `Beitrag "${frontmatter.title}" wurde veröffentlicht.`,
       post: {
         path: filePath,
-        sha: commitData.content?.sha ?? "",
+        sha: commitData!.content?.sha ?? "",
         ...frontmatter,
       } satisfies BlogPost,
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("Blog-Speichern fehlgeschlagen:", message);
+    console.error("Blog-Speichern fehlgeschlagen:", err instanceof Error ? err.message : err);
     return NextResponse.json(
-      { error: `Beitrag konnte nicht gespeichert werden: ${message}` },
+      { error: `Beitrag konnte nicht gespeichert werden: ${githubFehlerGrund(err)}` },
       { status: 502 }
     );
   }
@@ -282,7 +353,7 @@ export async function DELETE(request: Request) {
   }
 
   const auth = await authorize(body.siteId ?? null);
-  if ("error" in auth) return auth.error;
+  if (!auth.ok) return auth.error;
 
   const { path, sha } = body;
   if (!path || !sha) {
@@ -301,21 +372,45 @@ export async function DELETE(request: Request) {
 
   try {
     const octokit = createOctokit();
-    await octokit.repos.deleteFile({
-      owner: auth.site.repo_owner,
-      repo: auth.site.repo_name,
-      path,
-      message: `cms: delete blog post ${slug}`,
-      sha,
-      branch: "main",
-    });
+    // W13: Bei Versionskonflikt einmal mit frischem SHA erneut versuchen.
+    let currentSha = sha;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await octokit.repos.deleteFile({
+          owner: auth.site.repo_owner,
+          repo: auth.site.repo_name,
+          path,
+          message: `cms: delete blog post ${slug}`,
+          sha: currentSha,
+          branch: "main",
+        });
+        break;
+      } catch (err) {
+        if (attempt === 0 && isShaConflictError(err)) {
+          try {
+            const { data } = await octokit.repos.getContent({
+              owner: auth.site.repo_owner,
+              repo: auth.site.repo_name,
+              path,
+              ref: "main",
+            });
+            if (!Array.isArray(data) && data.type === "file") {
+              currentSha = data.sha;
+              continue;
+            }
+          } catch {
+            // Frisches Laden scheiterte – unten als Fehler melden
+          }
+        }
+        throw err;
+      }
+    }
 
     return NextResponse.json({ message: `Beitrag "${slug}" wurde gelöscht.` });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("Blog-Löschen fehlgeschlagen:", message);
+    console.error("Blog-Löschen fehlgeschlagen:", err instanceof Error ? err.message : err);
     return NextResponse.json(
-      { error: `Beitrag konnte nicht gelöscht werden: ${message}` },
+      { error: `Beitrag konnte nicht gelöscht werden: ${githubFehlerGrund(err)}` },
       { status: 502 }
     );
   }

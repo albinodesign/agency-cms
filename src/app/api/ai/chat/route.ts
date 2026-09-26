@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { streamText, stepCountIs, convertToModelMessages } from "ai";
 import type { UIMessage } from "ai";
-import { createClient } from "@/lib/supabase/server";
+import { requireSiteAccess } from "@/lib/auth";
 import { createOctokit, getManifestRaw, getRepoFile, normalizeManifest } from "@/lib/github";
 import { AI_MAX_STEPS, AiFieldContext, buildSystemPrompt, getAiModel, getAiModelId } from "@/lib/ai";
 import { buildAiTools } from "@/lib/ai-tools";
-import type { Site } from "@/types/cms";
+import type { DynamicListModel } from "@/lib/content-guard";
+import { modelleAusManifest } from "@/lib/content-guard";
 
 /** Ordnet einen OpenRouter-Fehler auf eine deutsche Kunden-Meldung zu. */
 function mapAiError(err: unknown): { message: string; status: number } {
@@ -81,29 +82,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Nachricht ist leer." }, { status: 400 });
   }
 
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Nicht authentifiziert." }, { status: 401 });
-  }
-
-  // Zugriff + KI-Freischaltung prüfen
-  const { data: assignment } = await supabase
-    .from("user_sites")
-    .select("site_id")
-    .eq("user_id", user.id)
-    .eq("site_id", siteId)
-    .maybeSingle();
-  if (!assignment) {
-    return NextResponse.json({ error: "Kein Zugriff auf diese Website." }, { status: 403 });
-  }
-  const { data: siteRow } = await supabase.from("sites").select("*").eq("id", siteId).single();
-  const site = siteRow as Site | null;
-  if (!site) {
-    return NextResponse.json({ error: "Website nicht gefunden." }, { status: 404 });
-  }
+  // Zugriff + KI-Freischaltung prüfen (zentral: src/lib/auth.ts)
+  const access = await requireSiteAccess(siteId);
+  if (!access.ok) return access.error;
+  const { supabase, user, site } = access;
   if (!site.ai_enabled) {
     return NextResponse.json(
       { error: "Der KI-Chat ist für diese Website nicht freigeschaltet." },
@@ -113,25 +95,35 @@ export async function POST(request: Request) {
 
   // Gespräch laden oder anlegen (Titel aus erster Nachricht).
   // Der Kunde schickt eine eigene ID mit – so geht beim Neuladen nichts verloren.
+  // W10: Ein Gespräch gehört seinem Ersteller – fremde Gespräche derselben
+  // Site lassen sich weder mitlesen noch fortschreiben. Alte Gespräche ohne
+  // Ersteller (created_by null) werden beim ersten Aufruf übernommen.
   const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   let convId = typeof conversationId === "string" && conversationId ? conversationId : null;
   if (convId && !uuidRe.test(convId)) convId = null;
   if (convId) {
     const { data: conv } = await supabase
       .from("ai_conversations")
-      .select("id")
+      .select("id,created_by")
       .eq("id", convId)
-      .eq("site_id", siteId)
+      .eq("site_id", site.id)
       .maybeSingle();
+    const owner = (conv as { id: string; created_by: string | null } | null)?.created_by ?? null;
     if (!conv) {
       // Neue ID vom Kunden: Gespräch damit anlegen
       const { error } = await supabase.from("ai_conversations").insert({
         id: convId,
-        site_id: siteId,
+        site_id: site.id,
         created_by: user.id,
         title: userContent.slice(0, 60) || "Neues Gespräch",
       });
       if (error) convId = null;
+    } else if (owner !== null && owner !== user.id) {
+      // Fremdes Gespräch: nicht übernehmen, frisches Gespräch beginnen
+      convId = null;
+    } else if (owner === null) {
+      // Altes Gespräch ohne Ersteller: übernehmen
+      await supabase.from("ai_conversations").update({ created_by: user.id }).eq("id", convId);
     }
   }
   if (!convId) {
@@ -156,12 +148,20 @@ export async function POST(request: Request) {
     return octokit;
   }
   let serverFields: AiFieldContext[];
+  // W17: Listenmodelle aus Standard + Manifest (Chat teilt Publish-Regeln).
+  let chatModelle: DynamicListModel[] | undefined;
   try {
     const loaded = await getManifestRaw(octo(), site.repo_owner, site.repo_name);
     const serverManifest = normalizeManifest(loaded.parsed);
     serverFields = serverManifest.sections.flatMap((s) =>
       s.fields.map((f) => ({ id: f.id, label: f.label, type: f.type, file: f.file, path: f.path, maxLength: f.maxLength }))
     );
+    const modelle = modelleAusManifest(serverManifest);
+    chatModelle = modelle.modelle;
+    if (modelle.fehler.length > 0) {
+      // Nur Warnung hier (der Publish lehnt kaputte Deklarationen streng ab).
+      console.error("ai/chat: Listenmodelle im Manifest fehlerhaft:", modelle.fehler.join(" | "));
+    }
   } catch (err) {
     return NextResponse.json(
       {
@@ -202,24 +202,41 @@ export async function POST(request: Request) {
   });
 
   // Werkzeuge aus dem testbaren Modul (dieselben Regeln wie im Publish).
+  // W17: Listenmodelle aus Standard + Manifest (Chat teilt Publish-Regeln).
+  // Kaputte Deklarationen wurden oben geloggt (der Publish lehnt sie streng ab).
   const tools = buildAiTools({
     site: { id: siteId, repo_owner: site.repo_owner, repo_name: site.repo_name },
     serverFields,
+    modelle: chatModelle,
     store: {
+      // W12: DB-Rohmledungen gehören ins Server-Protokoll – an KI/Kunde
+      // geht nur ein verständlicher Satz (keine Tabellen-/RLS-Details).
       storeDraft: async (sid, fieldId, value) => {
         const { error } = await supabase
           .from("drafts")
           .upsert({ site_id: sid, field_id: fieldId, value }, { onConflict: "site_id,field_id" });
-        return { error: error ? { message: error.message } : null };
+        if (error) {
+          console.error("ai/chat: storeDraft fehlgeschlagen:", error.message);
+          return { error: { message: "Speichern fehlgeschlagen (Details im Server-Protokoll)." } };
+        }
+        return { error: null };
       },
       storeCodeDraft: async (sid, filePath, content) => {
         const { error } = await supabase
           .from("code_drafts")
           .upsert({ site_id: sid, file_path: filePath, content }, { onConflict: "site_id,file_path" });
-        return { error: error ? { message: error.message } : null };
+        if (error) {
+          console.error("ai/chat: storeCodeDraft fehlgeschlagen:", error.message);
+          return { error: { message: "Speichern fehlgeschlagen (Details im Server-Protokoll)." } };
+        }
+        return { error: null };
       },
       listDrafts: async (sid) => {
-        const { data } = await supabase.from("drafts").select("field_id,value").eq("site_id", sid);
+        const { data, error } = await supabase.from("drafts").select("field_id,value").eq("site_id", sid);
+        if (error) {
+          console.error("ai/chat: listDrafts fehlgeschlagen:", error.message);
+          return [];
+        }
         return (data ?? []) as Array<{ field_id: string; value: string }>;
       },
       listImages: async (sid) => {

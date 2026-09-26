@@ -6,20 +6,11 @@ import {
   CheckCircle2,
   Copy,
   Loader2,
-  RefreshCw,
   X,
 } from "lucide-react";
 import type { Site } from "@/types/cms";
 
 const DEFAULT_REPO_OWNER = "albinodesign";
-
-function generatePassword(length = 12): string {
-  const chars =
-    "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%";
-  const array = new Uint32Array(length);
-  crypto.getRandomValues(array);
-  return Array.from(array, (n) => chars[n % chars.length]).join("");
-}
 
 interface CreateSiteModalProps {
   open: boolean;
@@ -29,7 +20,7 @@ interface CreateSiteModalProps {
 
 interface CreatedResult {
   site: Site;
-  credentials: { email: string; password: string };
+  einladung: { email: string; link: string };
 }
 
 export function CreateSiteModal({ open, onClose, onCreated }: CreateSiteModalProps) {
@@ -38,13 +29,12 @@ export function CreateSiteModal({ open, onClose, onCreated }: CreateSiteModalPro
   const [repoOwner, setRepoOwner] = useState(DEFAULT_REPO_OWNER);
   const [previewUrl, setPreviewUrl] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
-  const [customerPassword, setCustomerPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<CreatedResult | null>(null);
   const [copied, setCopied] = useState(false);
 
-  // Beim Öffnen: frisches Passwort generieren, Formular zurücksetzen
+  // Beim Öffnen: Formular zurücksetzen (N5: kein Passwort mehr – Einladungs-Link)
   useEffect(() => {
     if (open) {
       setName("");
@@ -52,7 +42,6 @@ export function CreateSiteModal({ open, onClose, onCreated }: CreateSiteModalPro
       setRepoOwner(DEFAULT_REPO_OWNER);
       setPreviewUrl("");
       setCustomerEmail("");
-      setCustomerPassword(generatePassword());
       setError(null);
       setResult(null);
       setCopied(false);
@@ -74,21 +63,20 @@ export function CreateSiteModal({ open, onClose, onCreated }: CreateSiteModalPro
           repoOwner,
           previewUrl,
           customerEmail,
-          customerPassword,
         }),
       });
       const body = (await res.json()) as {
         error?: string;
         site?: Site;
-        credentials?: { email: string; password: string };
+        einladung?: { email: string; link: string };
       };
 
-      if (!res.ok || !body.site || !body.credentials) {
+      if (!res.ok || !body.site || !body.einladung) {
         setError(body.error ?? "Website konnte nicht angelegt werden.");
         return;
       }
 
-      setResult({ site: body.site, credentials: body.credentials });
+      setResult({ site: body.site, einladung: body.einladung });
       onCreated(body.site);
     } catch {
       setError("Server nicht erreichbar. Bitte später erneut versuchen.");
@@ -99,7 +87,7 @@ export function CreateSiteModal({ open, onClose, onCreated }: CreateSiteModalPro
 
   async function handleCopy() {
     if (!result) return;
-    const text = `Zugang zum Website-CMS\nE-Mail: ${result.credentials.email}\nPasswort: ${result.credentials.password}`;
+    const text = `Zugang zum Website-CMS\nE-Mail: ${result.einladung.email}\nEinladungs-Link (einmalig weitergeben, läuft ab):\n${result.einladung.link}`;
     try {
       await navigator.clipboard.writeText(text);
       setCopied(true);
@@ -151,19 +139,23 @@ export function CreateSiteModal({ open, onClose, onCreated }: CreateSiteModalPro
 
             <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-sm">
               <p className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
-                Zugangsdaten für den Kunden
+                Einladung für den Kunden
               </p>
               <p className="mt-2">
                 <span className="text-zinc-500">E-Mail:</span>{" "}
                 <span className="font-medium text-zinc-900">
-                  {result.credentials.email}
+                  {result.einladung.email}
                 </span>
               </p>
-              <p className="mt-1">
-                <span className="text-zinc-500">Passwort:</span>{" "}
-                <code className="rounded bg-zinc-200 px-1.5 py-0.5 font-mono text-zinc-900">
-                  {result.credentials.password}
-                </code>
+              <p className="mt-2 break-all">
+                <span className="text-zinc-500">Einladungs-Link:</span>{" "}
+                <span className="font-mono text-xs text-zinc-900">
+                  {result.einladung.link}
+                </span>
+              </p>
+              <p className="mt-2 text-xs text-zinc-500">
+                Einmalig an den Kunden weitergeben (z. B. per E-Mail) – der Link läuft ab.
+                Der Kunde vergibt sein Passwort selbst, es steht nirgends im Klartext.
               </p>
             </div>
 
@@ -177,7 +169,7 @@ export function CreateSiteModal({ open, onClose, onCreated }: CreateSiteModalPro
                 ) : (
                   <Copy className="h-4 w-4" />
                 )}
-                {copied ? "Kopiert!" : "Zugangsdaten kopieren"}
+                {copied ? "Kopiert!" : "Einladung kopieren"}
               </button>
               <button
                 onClick={onClose}
@@ -256,30 +248,11 @@ export function CreateSiteModal({ open, onClose, onCreated }: CreateSiteModalPro
               value={customerEmail}
               onChange={(e) => setCustomerEmail(e.target.value)}
               placeholder="kunde@schmidt-maler.de"
-              className={`${inputClass} mb-4`}
+              className={`${inputClass} mb-2`}
             />
-
-            <label className="mb-1 block text-sm font-medium text-zinc-700">
-              Kunden-Passwort
-            </label>
-            <div className="mb-6 flex gap-2">
-              <input
-                type="text"
-                required
-                minLength={8}
-                value={customerPassword}
-                onChange={(e) => setCustomerPassword(e.target.value)}
-                className={`${inputClass} font-mono`}
-              />
-              <button
-                type="button"
-                onClick={() => setCustomerPassword(generatePassword())}
-                title="Neues Passwort generieren"
-                className="shrink-0 rounded-lg border border-zinc-300 px-3 text-zinc-600 transition hover:bg-zinc-100"
-              >
-                <RefreshCw className="h-4 w-4" />
-              </button>
-            </div>
+            <p className="mb-6 text-xs text-zinc-500">
+              Der Kunde erhält einen Einladungs-Link und vergibt sein Passwort selbst.
+            </p>
 
             <button
               type="submit"

@@ -29,6 +29,11 @@ export interface ManifestSection {
   id: string;
   title: string;
   fields: ManifestField[];
+  /**
+   * Optionale Seitenzuordnung (N3): Wenn die Agentur sie pflegt, gruppiert
+   * der Editor danach statt nach Schlüsselwort-Heuristik.
+   */
+  page?: string;
 }
 
 export interface CmsManifest {
@@ -37,6 +42,21 @@ export interface CmsManifest {
   features?: {
     blog?: boolean | { enabled?: boolean };
   };
+  /**
+   * Ausdrücklich modellierte dynamische Listen (W17): Nur diese Listen dürfen
+   * per Entwurf am Ende wachsen. Beispiel:
+   * { datei: "src/content/pages/referenzen.json", pfad: "items",
+   *   felder: { titel: "text", text: "text", sterne: "number" } }
+   * Ohne Eintrag sind alle Listen fest (bisheriges Verhalten).
+   */
+  listenmodelle?: Listenmodell[];
+}
+
+/** Deklaratives Wachstumsmodell einer Liste (Agentur-Regel im Manifest). */
+export interface Listenmodell {
+  datei: string;
+  pfad: string;
+  felder: Record<string, FieldType>;
 }
 
 export interface BlogFrontmatter {
@@ -81,11 +101,13 @@ export interface PublishHistoryEntry {
   site_id: string;
   published_by: string | null;
   commit_sha: string | null;
-  /** Vollständige Datei-Inhalte, verschachtelt nach Dateipfad: { "src/content/pages/home.json": { ... } } */
-  payload: Record<string, Record<string, unknown>>;
+  /** Vollständige Datei-Inhalte, verschachtelt nach Dateipfad (nur bei Bedarf geladen, kann fehlen) */
+  payload?: Record<string, Record<string, unknown>>;
   created_at: string;
   /** Optionale Notiz, z. B. "Rollback" oder "ai-chat" (Spalte kann fehlen) */
   note?: string | null;
+  /** Dateiliste des Eintrags für metadaten-schlankes Laden (Spalte kann fehlen/legacy null sein) */
+  files?: string[] | null;
 }
 
 export type DraftMap = Record<string, string>;

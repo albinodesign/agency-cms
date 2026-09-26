@@ -98,6 +98,27 @@ export function BlogEditorModal({
       onError("Bitte einen Titel eingeben.");
       return;
     }
+    // W9: Gleiche Grenzen wie der Server (freundliche Meldung vor dem Speichern)
+    if (title.trim().length > 200) {
+      onError("Der Titel ist zu lang (max. 200 Zeichen).");
+      return;
+    }
+    if (excerpt.length > 500) {
+      onError("Die Kurzbeschreibung ist zu lang (max. 500 Zeichen).");
+      return;
+    }
+    if (coverImageAlt.length > 200) {
+      onError("Der Bild-Alt-Text ist zu lang (max. 200 Zeichen).");
+      return;
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(date))) {
+      onError("Das Datum braucht das Format JJJJ-MM-TT.");
+      return;
+    }
+    if (content.length > 100_000) {
+      onError("Der Artikeltext ist zu lang (max. 100.000 Zeichen).");
+      return;
+    }
     const finalSlug = slugify(slug || title);
     if (!finalSlug) {
       onError("Die Webadresse ist ungültig.");
@@ -174,8 +195,12 @@ export function BlogEditorModal({
               value={title}
               onChange={(e) => handleTitleChange(e.target.value)}
               placeholder="z. B. 5 Tipps für Ihr neues Bad"
+              maxLength={220}
               className={inputClass}
             />
+            <p className="mt-1 text-right text-xs text-zinc-400">
+              {title.length} / 200 Zeichen
+            </p>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
@@ -242,9 +267,13 @@ export function BlogEditorModal({
               value={excerpt}
               onChange={(e) => setExcerpt(e.target.value)}
               rows={3}
+              maxLength={550}
               placeholder="Kurze Zusammenfassung des Beitrags …"
               className={`${inputClass} resize-y`}
             />
+            <p className="mt-1 text-right text-xs text-zinc-400">
+              {excerpt.length} / 500 Zeichen
+            </p>
           </div>
 
           <label className="flex cursor-pointer items-center justify-between rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-3">
