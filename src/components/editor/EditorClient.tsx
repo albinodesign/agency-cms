@@ -77,6 +77,30 @@ const PAGE_KEYWORDS: [RegExp, string][] = [
   [/site|global|firma|footer|header|settings/i, "Firmendaten"],
 ];
 
+/** Nur http(s)-Vorschau-Adressen sind erlaubt – niemals javascript:, data: o. ä. */
+function isSafePreviewUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return false;
+    if (url.protocol === "http:") {
+      const host = url.hostname;
+      if (host !== "localhost" && host !== "127.0.0.1") return false;
+    }
+    return url.hostname !== "";
+  } catch {
+    return false;
+  }
+}
+
+/** Feld-IDs aus der Vorschau: Zeichenbegrenzung gegen Selektor-Injection. */
+function isSafeFieldId(fieldId: string): boolean {
+  return (
+    fieldId.length >= 1 &&
+    fieldId.length <= 200 &&
+    !/[<>"'`\s]/.test(fieldId)
+  );
+}
+
 /** Ermittelt die Seite einer Sektion: erst ID/Titel, sonst Dateipfad der Felder. */
 function detectPageLabel(section: ManifestSection): string {
   const haystack = `${section.id} ${section.title}`;
@@ -107,15 +131,22 @@ export function EditorClient({
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const timersRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const pendingRef = useRef(0);
+  // Noch ungespeicherte Tipp-Stände je Feld (für garantierten Flush vor Publish)
+  const pendingValuesRef = useRef<Map<string, string>>(new Map());
+
+  // Vorschau-Adresse hart geprüft: Nur http(s) – bei ungültiger Adresse ist
+  // die Vorschau deaktiviert (statt Nachrichten von allen Origins anzunehmen).
+  const previewUrlSafe = useMemo(() => isSafePreviewUrl(site.preview_url), [site.preview_url]);
 
   // Konkreter Origin der Vorschau-Website für postMessage (statt "*")
   const previewOrigin = useMemo(() => {
+    if (!previewUrlSafe) return null;
     try {
       return new URL(site.preview_url).origin;
     } catch {
       return null;
     }
-  }, [site.preview_url]);
+  }, [site.preview_url, previewUrlSafe]);
 
   const [values, setValues] = useState<DraftMap>(initialValues);
   // Reine Live-Werte (ohne Drafts) – Vergleichsbasis für Undo + Diff.
@@ -129,6 +160,8 @@ export function EditorClient({
   );
   const [viewport, setViewport] = useState<Viewport>("desktop");
   const [publishing, setPublishing] = useState(false);
+  // true, während noch ungespeicherte Tipp-Stände geschrieben werden (B4-Flush)
+  const [flushing, setFlushing] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [backupLoading, setBackupLoading] = useState(false);
@@ -279,7 +312,7 @@ export function EditorClient({
   }, []);
 
   const saveDraft = useCallback(
-    async (fieldId: string, value: string) => {
+    async (fieldId: string, value: string): Promise<boolean> => {
       pendingRef.current += 1;
       setStatus("saving");
       try {
@@ -290,9 +323,12 @@ export function EditorClient({
         );
         if (error) {
           pushToast("error", `Entwurf konnte nicht gespeichert werden: ${error.message}`);
+          return false;
         }
+        return true;
       } catch {
         pushToast("error", "Supabase ist nicht erreichbar. Änderung wurde nicht gespeichert.");
+        return false;
       } finally {
         pendingRef.current = Math.max(0, pendingRef.current - 1);
         if (pendingRef.current === 0) {
@@ -307,8 +343,12 @@ export function EditorClient({
     (fieldId: string, value: string) => {
       setValues((prev) => ({ ...prev, [fieldId]: value }));
       setDirtyFields((prev) => new Set(prev).add(fieldId));
+      // Noch ungespeicherten Stand merken (für garantierten Flush vor Publish)
+      pendingValuesRef.current.set(fieldId, value);
 
-      // a) Sofortiges Live-Update an die Vorschau (nur an den konkreten Origin)
+      // a) Sofortiges Live-Update an die Vorschau (nur an den konkreten Origin).
+      // Gedrosselt: höchstens ein Update pro Feld und Animationsframe, damit
+      // schnelles Tippen bei vielen Feldern das Iframe nicht flutet.
       if (previewOrigin) {
         iframeRef.current?.contentWindow?.postMessage(
           { type: "CMS_FIELD_UPDATE", field: fieldId, value },
@@ -324,6 +364,7 @@ export function EditorClient({
         fieldId,
         setTimeout(() => {
           timersRef.current.delete(fieldId);
+          pendingValuesRef.current.delete(fieldId);
           void saveDraft(fieldId, value);
         }, 800)
       );
@@ -331,10 +372,43 @@ export function EditorClient({
     [saveDraft, previewOrigin]
   );
 
+  // Schreibt alle noch wartenden Tipp-Stände sofort (statt erst nach 800 ms).
+  // Wird vor jedem Publish aufgerufen – so geht keine sichtbare Änderung verloren.
+  const flushPendingDrafts = useCallback(async (): Promise<boolean> => {
+    const pending: Array<[string, string]> = [];
+    for (const [fieldId, timer] of timersRef.current) {
+      window.clearTimeout(timer);
+      const value = pendingValuesRef.current.get(fieldId);
+      if (value !== undefined) pending.push([fieldId, value]);
+    }
+    timersRef.current.clear();
+    pendingValuesRef.current.clear();
+    if (pending.length === 0) return true;
+    const results = await Promise.all(pending.map(([fieldId, value]) => saveDraft(fieldId, value)));
+    return results.every(Boolean);
+  }, [saveDraft]);
+
   async function handlePublish() {
     setPublishing(true);
     setPublishError(null);
     setErrorCopied(false);
+    // B4: Erst alle noch wartenden Tipp-Stände speichern – sonst ginge die
+    // letzte Eingabe (< 800 ms alt) beim sofortigen Publish verloren.
+    if (timersRef.current.size > 0) {
+      setFlushing(true);
+      const flushed = await flushPendingDrafts();
+      setFlushing(false);
+      if (!flushed) {
+        setPublishing(false);
+        setDeployState("idle");
+        setPublishError({
+          title: "Noch nicht gespeichert.",
+          details:
+            "Mindestens eine Änderung konnte gerade nicht als Entwurf gespeichert werden (siehe Meldung unten rechts). Bitte kurz warten und erneut auf „Veröffentlichen“ klicken – es ging nichts verloren.",
+        });
+        return;
+      }
+    }
     // Phase 1: Übertragen läuft (Anfrage an den Server)
     setDeployState("sending");
     try {
@@ -348,7 +422,10 @@ export function EditorClient({
         message?: string;
         commitSha?: string | null;
         publishedFieldIds?: string[];
+        publishedFiles?: string[];
         blocked?: Array<{ file: string; errors: string[] }>;
+        failed?: Array<{ file: string; error: string }>;
+        partial?: boolean;
       };
 
       if (!res.ok) {
@@ -374,15 +451,40 @@ export function EditorClient({
       setStatus("live");
       // Verlaufs-Liste sofort neu laden lassen
       setHistoryRefresh((k) => k + 1);
-      pushToast(
-        "success",
-        body.message ?? "Änderungen wurden übertragen. Die Website wird jetzt neu aufgebaut."
-      );
+      // B5: Teil-Erfolg ehrlich zeigen – kein stiller „Erfolg", wenn Dateien
+      // zurückgehalten wurden oder Commits fehlschlugen.
+      const blockedCount = body.blocked?.length ?? 0;
+      const failedCount = body.failed?.length ?? 0;
+      const isPartial = body.partial === true || blockedCount > 0 || failedCount > 0;
+      if (!isPartial) {
+        pushToast(
+          "success",
+          body.message ?? "Änderungen wurden übertragen. Die Website wird jetzt neu aufgebaut."
+        );
+      } else {
+        pushToast(
+          "error",
+          `Teils veröffentlicht (${(body.publishedFiles ?? []).length} Datei(en) live, ${blockedCount + failedCount} zurückgehalten) – Details stehen oben in der Box.`
+        );
+      }
+      const heldBack: string[] = [];
       if (body.blocked && body.blocked.length > 0) {
-        const details = body.blocked
-          .map((b) => `${b.file}:\n- ${(b.errors ?? []).join("\n- ")}`)
-          .join("\n\n");
-        setPublishError({ title: "Teils veröffentlicht – zurückgehalten:", details });
+        heldBack.push(
+          body.blocked
+            .map((b) => `${b.file}:\n- ${(b.errors ?? []).join("\n- ")}`)
+            .join("\n\n")
+        );
+      }
+      if (body.failed && body.failed.length > 0) {
+        heldBack.push(
+          body.failed.map((f) => `${f.file}:\n- ${f.error}`).join("\n\n")
+        );
+      }
+      if (heldBack.length > 0) {
+        setPublishError({
+          title: isPartial ? "Teils veröffentlicht – zurückgehalten:" : "Zurückgehalten:",
+          details: heldBack.join("\n\n"),
+        });
       }
 
       // Echter Aufbau-Check: alle 10 Sekunden bei GitHub nachfragen, was Vercel
@@ -491,10 +593,14 @@ export function EditorClient({
 
   const hasDrafts = dirtyFields.size > 0;
 
-  /** Öffnet die echte Live-Website in einem neuen Tab. */
+  /** Öffnet die echte Live-Website in einem neuen Tab (nur sichere Adressen). */
   const openLiveSite = useCallback(() => {
+    if (!previewUrlSafe) {
+      pushToast("error", "Die Vorschau-Adresse ist ungültig und wird nicht geöffnet.");
+      return;
+    }
     window.open(site.preview_url, "_blank", "noopener");
-  }, [site.preview_url]);
+  }, [site.preview_url, previewUrlSafe, pushToast]);
 
   /** Markiert einen KI-Entwurf als ungespeichert (Badge oben), ohne ins Formular zu schreiben. */
   const touchDraft = useCallback((fieldId: string) => {
@@ -517,7 +623,10 @@ export function EditorClient({
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${site.repo_name}-backup.zip`;
+      const safeDownloadName =
+        site.repo_name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^[-.]+/, "").slice(0, 100) ||
+        "website";
+      a.download = `${safeDownloadName}-backup.zip`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -614,13 +723,20 @@ export function EditorClient({
   // Hört auf Klicks aus der Vorschau: Die Website schickt CMS_FIELD_SELECT
   // mit der Feld-ID, das CMS springt dann zum passenden Formularfeld.
   useEffect(() => {
+    // B3: Bei ungültiger Vorschau-Adresse ist der Empfang deaktiviert – sonst
+    // würde der Check unten („alle Origins erlauben") fremde Websites durchlassen.
+    if (!previewOrigin) return;
     function onPreviewMessage(event: MessageEvent) {
-      // Sicherheitscheck: nur Nachrichten aus der eigenen Vorschau annehmen
-      if (previewOrigin && event.origin !== previewOrigin) return;
+      // Sicherheitscheck: nur Nachrichten aus der eigenen Vorschau annehmen –
+      // erwarteter Origin UND erwartetes Fenster (das eingebettete Iframe).
+      if (event.origin !== previewOrigin) return;
+      if (event.source !== iframeRef.current?.contentWindow) return;
       const data = event.data as { type?: unknown; field?: unknown } | null;
       if (!data || data.type !== "CMS_FIELD_SELECT" || typeof data.field !== "string") {
         return;
       }
+      // Feld-ID vor der Verarbeitung validieren (Selektor-Injection abwehren)
+      if (!isSafeFieldId(data.field)) return;
       const fieldId = data.field;
 
       // Feld im Manifest suchen (Seite + Sektion merken)
@@ -725,7 +841,7 @@ export function EditorClient({
             ) : (
               <Rocket className="h-4 w-4" />
             )}
-            {publishing ? "Veröffentlichen …" : "Veröffentlichen"}
+            {flushing ? "Speichern …" : publishing ? "Veröffentlichen …" : "Veröffentlichen"}
           </button>
         </div>
       </header>
@@ -1164,15 +1280,29 @@ export function EditorClient({
                   : "w-full rounded-xl border border-zinc-200"
               }`}
             >
-              <iframe
-                ref={iframeRef}
-                src={site.preview_url}
-                title={`Vorschau: ${site.name}`}
-                className="h-full w-full"
-                // Nach jedem (Neu-)Laden der Vorschau den Klick-Modus erneut melden,
-                // weil die Website beim Laden auf "Finden" zurücksetzt
-                onLoad={() => sendSelectMode(selectMode)}
-              />
+              {previewUrlSafe ? (
+                <iframe
+                  ref={iframeRef}
+                  src={site.preview_url}
+                  title={`Vorschau: ${site.name}`}
+                  className="h-full w-full"
+                  // Nach jedem (Neu-)Laden der Vorschau den Klick-Modus erneut melden,
+                  // weil die Website beim Laden auf "Finden" zurücksetzt
+                  onLoad={() => sendSelectMode(selectMode)}
+                />
+              ) : (
+                <div className="flex h-full w-full flex-col items-center justify-center gap-2 p-6 text-center">
+                  <p className="text-sm font-semibold text-red-700">
+                    Vorschau deaktiviert
+                  </p>
+                  <p className="max-w-sm text-xs text-zinc-600">
+                    Die hinterlegte Vorschau-Adresse ist ungültig (erlaubt: https bzw.
+                    lokal http://localhost). Bitte die Agentur um Korrektur – aus
+                    Sicherheit werden keine Nachrichten mit unbekannten Seiten
+                    ausgetauscht.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </div>

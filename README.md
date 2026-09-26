@@ -68,24 +68,23 @@ create table admins (
 );
 ```
 
-Row Level Security aktivieren; Policy-Idee: Nutzer dürfen nur Zeilen sehen/ändern, deren `site_id` in `user_sites` dem eigenen `auth.uid()` zugeordnet ist.
+Row Level Security ist Pflicht. Die vollständigen Policies liegen versioniert im
+Repository (`supabase/cms-rls-schema.sql`, ergänzt `supabase/ai-chat-schema.sql`)
+und müssen einmalig im Supabase SQL-Editor ausgeführt werden: Nutzer sehen und
+ändern nur Zeilen von Sites, für die sie in `user_sites` eingetragen sind. Die
+`admins`-Tabelle ist nur über den Service-Role-Key lesbar (Admin-Check
+serverseitig). Ohne diese Policies ist das CMS nicht mandantenfähig.
 
 ## Supabase Storage (Bild-Uploads)
 
 Bilder aus `type: "image"`-Feldern werden clientseitig in den Bucket `cms-media` hochgeladen (Pfad: `sites/{siteId}/{timestamp}-{dateiname}`).
 
-1. Bucket `cms-media` anlegen und als **public** markieren.
-2. Storage-Policy: authentifizierte Nutzer dürfen hochladen/lesen, z. B.:
-
-   ```sql
-   create policy "authenticated users can upload cms-media"
-   on storage.objects for insert to authenticated
-   with check (bucket_id = 'cms-media');
-
-   create policy "public read cms-media"
-   on storage.objects for select to public
-   using (bucket_id = 'cms-media');
-   ```
+1. Die Policies aus `supabase/cms-rls-schema.sql` ausführen (legt Bucket +
+   Regeln an). Lesen bleibt öffentlich (Bilder sind Website-Inhalte und müssen
+   auch ohne Login ladbar sein). Schreiben (hochladen/ersetzen/löschen) geht
+   nur authentifiziert und nur im eigenen Ordner `sites/{eigeneSiteId}/...` –
+   fremde Site-Ordner werden von der Datenbank abgewiesen. Pfade außerhalb von
+   `sites/{uuid}/` werden grundsätzlich abgelehnt.
 
 ## CMS-Manifest (im Kunden-Repo)
 
@@ -165,21 +164,29 @@ nie auf der echten Live-Seite (`window.self !== window.top`):
 ```html
 <script is:inline>
   if (window.self !== window.top) {
+    // Erlaubte CMS-Herkünfte – die Agentur trägt hier pro Projekt ein:
+    // 1) die Live-CMS-Domain, 2) lokal zum Testen (sonst nichts!).
+    const CMS_ORIGINS = ["https://cms.deine-agentur.de", "http://localhost:3000"];
+
     // true = Klick sucht das Feld im CMS ("Finden"), false = normale Links ("Surfen")
     let selectMode = true;
 
     // Richtung 1: CMS -> Website (Live-Vorschau beim Tippen).
-    // Hinweis: Absichtlich ohne Origin-Check, weil das CMS mal lokal
-    // (localhost) und mal auf Vercel läuft. Es werden nur Texte/Bilder
-    // in der Vorschau ausgetauscht, nichts gespeichert.
+    // Nur Nachrichten aus der erlaubten CMS-Herkunft annehmen – niemals
+    // ohne Origin-Check (sonst könnte jede fremde Seite Texte/Bilder
+    // in der Vorschau umschreiben).
     window.addEventListener("message", (event) => {
+      if (!CMS_ORIGINS.includes(event.origin)) return;
+      if (event.source !== window.parent) return;
       if (event.data?.type === "CMS_SELECT_MODE") {
         selectMode = event.data.enabled !== false;
         return;
       }
       if (event.data?.type !== "CMS_FIELD_UPDATE") return;
-      const field = event.data.field;
-      document.querySelectorAll(`[data-cms-field="${field}"]`).forEach((el) => {
+      if (typeof event.data.field !== "string" || typeof event.data.value !== "string") return;
+      if (/[<>"'`]/.test(event.data.field)) return;
+      // CSS.escape schützt den Selektor vor Feld-IDs mit Sonderzeichen.
+      document.querySelectorAll(`[data-cms-field="${CSS.escape(event.data.field)}"]`).forEach((el) => {
         if (el.tagName === "IMG") {
           el.src = event.data.value;
           el.removeAttribute("srcset");
@@ -193,12 +200,26 @@ nie auf der echten Live-Seite (`window.self !== window.top`):
 
     // Richtung 2: Website -> CMS (Klick auf Text meldet das Feld).
     // Es werden nur Feld-IDs (z. B. "hero.title") geschickt, keine Inhalte.
+    // Als Ziel die Herkunft der einbettenden Seite aus document.referrer
+    // ableiten – niemals "*" (sonst leaken Feld-IDs an beliebige Parents,
+    // falls die Seite fremd eingebettet wird).
+    function cmsTargetOrigin() {
+      try {
+        const ref = new URL(document.referrer);
+        if (CMS_ORIGINS.includes(ref.origin)) return ref.origin;
+      } catch {
+        /* kein Referrer – nichts senden */
+      }
+      return null;
+    }
     document.addEventListener(
       "click",
       (event) => {
         if (!selectMode) return;
         const el = event.target.closest("[data-cms-field]");
         if (!el) return;
+        const target = cmsTargetOrigin();
+        if (!target) return;
         event.preventDefault();
         event.stopPropagation();
         document
@@ -207,7 +228,7 @@ nie auf der echten Live-Seite (`window.self !== window.top`):
         el.classList.add("cms-selected");
         window.parent.postMessage(
           { type: "CMS_FIELD_SELECT", field: el.getAttribute("data-cms-field") },
-          "*"
+          target
         );
       },
       true
@@ -224,10 +245,12 @@ nie auf der echten Live-Seite (`window.self !== window.top`):
 </script>
 ```
 
-Voraussetzung: Jedes editierbare Element trägt `data-cms-field="[feld-id]`
-(genau die ID aus dem Manifest), jede Sektion `data-cms-section="[sektion-id]".
-Das CMS prüft eingehende Klicks seinerseits gegen die Vorschau-Adresse,
-fremde Websites können also nichts auslösen.
+Voraussetzung: Jedes editierbare Element trägt `data-cms-field="[feld-id]"`
+(genau die ID aus dem Manifest), jede Sektion `data-cms-section="[sektion-id]"`.
+Beide Seiten prüfen Herkunft UND Quelle: Die Website nimmt nur Nachrichten aus
+`CMS_ORIGINS` vom einbettenden Parent an, das CMS nur Nachrichten aus der
+hinterlegten Vorschau-Adresse vom eingebetteten Iframe (bei ungültiger Adresse
+ist der Empfang deaktiviert). `postMessage("*")` wird nirgends verwendet.
 
 ## Publish-Flow
 

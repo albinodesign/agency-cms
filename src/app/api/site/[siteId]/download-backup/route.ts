@@ -51,10 +51,15 @@ export async function GET(_request: Request, { params }: BackupPageProps) {
       ref: "main",
     });
     const buffer = data as unknown as ArrayBuffer;
+    // Dateiname gegen Header-Injection härten: Quotes, Zeilenumbrüche und
+    // Sonderzeichen aus dem (adminseitig geprüften) Repo-Namen entfernen.
+    const safeName =
+      typedSite.repo_name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^[-.]+/, "").slice(0, 100) ||
+      "website";
     return new NextResponse(buffer, {
       headers: {
         "Content-Type": "application/zip",
-        "Content-Disposition": `attachment; filename="${typedSite.repo_name}-backup.zip"`,
+        "Content-Disposition": `attachment; filename="${safeName}-backup.zip"`,
       },
     });
   } catch (err) {

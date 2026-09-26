@@ -104,8 +104,19 @@ export async function POST(request: Request) {
       );
     }
 
-    // Code-Entwürfe laden (Design, Feldliste, Blog – alles volle Dateien)
-    const { data: codeRows } = await supabase.from("code_drafts").select("*").eq("site_id", siteId);
+    // Code-Entwürfe laden (Design, Feldliste, Blog – alles volle Dateien).
+    // Ein Datenbankfehler darf hier nicht still als „keine Code-Drafts"
+    // gewertet werden – sonst gingen Entwürfe unbemerkt verloren.
+    const { data: codeRows, error: codeRowsError } = await supabase
+      .from("code_drafts")
+      .select("*")
+      .eq("site_id", siteId);
+    if (codeRowsError) {
+      return NextResponse.json(
+        { error: `Code-Entwürfe konnten nicht geladen werden: ${codeRowsError.message}` },
+        { status: 500 }
+      );
+    }
     const codeDrafts = (codeRows ?? []) as CodeDraft[];
 
     const typedDrafts = (drafts ?? []) as Draft[];
@@ -622,31 +633,51 @@ export async function POST(request: Request) {
 
     // Phase 2: jetzt erst committen (alles wurde oben je Datei geprüft).
     // Schlägt ein Commit fehl, laufen die übrigen weiter (Teilveröffentlichung).
+    // B5: Bei SHA-Konflikt (paralleler Push) einmal mit frischem SHA neu versuchen.
     const commitFailed: Array<{ file: string; error: string }> = [];
+    const isShaConflict = (err: unknown): boolean => {
+      const msg = err instanceof Error ? err.message : String(err);
+      return /409|sha|conflict|does not match|stale|veraltet/i.test(msg);
+    };
     for (const [filePath, final] of finalContent) {
-      const base = baseFiles.get(filePath)!;
-      try {
-        const { data: commitData } = await octokit.repos.createOrUpdateFileContents({
-          owner: typedSite.repo_owner,
-          repo: typedSite.repo_name,
-          path: filePath,
-          message: COMMIT_MESSAGE,
-          content: Buffer.from(final.text, "utf-8").toString("base64"),
-          ...(base.sha ? { sha: base.sha } : {}),
-          branch: "main",
-        });
-        lastCommitSha = commitData.commit.sha ?? null;
-      } catch (err) {
-        commitFailed.push({
-          file: filePath,
-          error: `GitHub-Commit für "${filePath}" fehlgeschlagen: ${
-            err instanceof Error ? err.message : "Unbekannter Fehler"
-          }`,
-        });
-        delete payload[filePath];
-        finalContent.delete(filePath);
-        continue;
+      let base = baseFiles.get(filePath)!;
+      let committed = false;
+      for (let attempt = 0; attempt < 2 && !committed; attempt += 1) {
+        try {
+          const { data: commitData } = await octokit.repos.createOrUpdateFileContents({
+            owner: typedSite.repo_owner,
+            repo: typedSite.repo_name,
+            path: filePath,
+            message: COMMIT_MESSAGE,
+            content: Buffer.from(final.text, "utf-8").toString("base64"),
+            ...(base.sha ? { sha: base.sha } : {}),
+            branch: "main",
+          });
+          lastCommitSha = commitData.commit.sha ?? null;
+          committed = true;
+        } catch (err) {
+          // Einmal neu laden + erneut versuchen, sonst als Fehlschlag werten
+          if (attempt === 0 && isShaConflict(err)) {
+            try {
+              const fresh = await getRepoFile(octokit, typedSite.repo_owner, typedSite.repo_name, filePath);
+              base = { text: fresh.text, sha: fresh.sha };
+              baseFiles.set(filePath, base);
+              continue;
+            } catch {
+              // Frisches Laden scheiterte ebenfalls – unten als Fehler melden
+            }
+          }
+          commitFailed.push({
+            file: filePath,
+            error: `GitHub-Commit für "${filePath}" fehlgeschlagen: ${
+              err instanceof Error ? err.message : "Unbekannter Fehler"
+            }`,
+          });
+          delete payload[filePath];
+          finalContent.delete(filePath);
+        }
       }
+      if (!committed) continue;
       if (final.kind === "text") {
         // Text-Dateien als Rohtext sichern (für echtes Wiederherstellen)
         payload[filePath] = { __text: final.text };
@@ -757,6 +788,10 @@ export async function POST(request: Request) {
       publishedFiles: committedFiles,
       publishedFieldIds,
       blocked: blockedList,
+      failed: commitFailed,
+      // B5: Ehrliche Unterscheidung – true, sobald etwas zurückgehalten wurde
+      // oder Commits fehlschlugen (Client zeigt dann Warnung statt Jubel).
+      partial: blockedList.length > 0 || commitFailed.length > 0,
       // Echter Versions-Stempel für den Aufbau-Check (Vercel meldet den Bau-Status daran)
       commitSha: lastCommitSha,
     });

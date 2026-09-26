@@ -81,7 +81,13 @@ export function HistoryDrawer({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ siteId, historyId: entry.id }),
       });
-      const body = (await res.json()) as { error?: string; message?: string };
+      const body = (await res.json()) as {
+        error?: string;
+        message?: string;
+        partial?: boolean;
+        failed?: Array<{ file: string; error: string }>;
+        blocked?: Array<{ file: string; errors: string[] }>;
+      };
 
       if (!res.ok) {
         onError(body.error ?? "Wiederherstellung fehlgeschlagen.");
@@ -89,7 +95,15 @@ export function HistoryDrawer({
         return;
       }
 
-      onSuccess(body.message ?? "Version wurde erfolgreich wiederhergestellt.");
+      const heldBack = [
+        ...(body.blocked ?? []).flatMap((b) => (b.errors ?? []).map((e) => `${b.file}: ${e}`)),
+        ...(body.failed ?? []).map((f) => `${f.file}: ${f.error}`),
+      ];
+      onSuccess(
+        body.partial && heldBack.length > 0
+          ? `${body.message ?? "Teils wiederhergestellt."} Zurückgehalten: ${heldBack.join("; ")}`
+          : (body.message ?? "Version wurde erfolgreich wiederhergestellt.")
+      );
 
       // Harter Browser-Reload, damit React Formularfelder und Iframe
       // komplett neu initialisiert (kein router.refresh()!)

@@ -70,9 +70,59 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
+    // Formatprüfung: Nur sichere Zeichen persistieren – freie Strings aus dem
+    // Admin-Formular dürfen weder Pfad-Tricks noch Skript-URLs in die
+    // Datenbank bringen (die Vorschau-URL landet später im Iframe/postMessage).
+    const owner = repoOwner.trim();
+    const repo = repoName.trim();
+    const preview = previewUrl.trim();
+    if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,38}[a-zA-Z0-9])?$/.test(owner)) {
+      return NextResponse.json(
+        { error: "Der GitHub-Owner enthält ungültige Zeichen (erlaubt: Buchstaben, Zahlen, Bindestrich)." },
+        { status: 400 }
+      );
+    }
+    if (repo.length > 100 || !/^[a-zA-Z0-9._-]+$/.test(repo) || repo.includes("..")) {
+      return NextResponse.json(
+        { error: "Der Repository-Name enthält ungültige Zeichen (erlaubt: Buchstaben, Zahlen, Punkt, Unter- und Bindestrich)." },
+        { status: 400 }
+      );
+    }
+    if (name.trim().length > 200) {
+      return NextResponse.json(
+        { error: "Der Website-Name ist zu lang (max. 200 Zeichen)." },
+        { status: 400 }
+      );
+    }
+    let previewUrlChecked: URL;
+    try {
+      previewUrlChecked = new URL(preview);
+    } catch {
+      return NextResponse.json(
+        { error: "Die Vorschau-URL ist keine gültige URL (z. B. https://meine-website.vercel.app)." },
+        { status: 400 }
+      );
+    }
+    const isLocalhost =
+      previewUrlChecked.hostname === "localhost" || previewUrlChecked.hostname === "127.0.0.1";
+    if (
+      (previewUrlChecked.protocol !== "https:" && !(previewUrlChecked.protocol === "http:" && isLocalhost)) ||
+      !previewUrlChecked.hostname
+    ) {
+      return NextResponse.json(
+        { error: "Die Vorschau-URL muss mit https:// beginnen (lokal ist http://localhost erlaubt)." },
+        { status: 400 }
+      );
+    }
     if (!customerEmail?.trim() || !customerPassword || customerPassword.length < 8) {
       return NextResponse.json(
         { error: "Kunden-E-Mail und ein Passwort mit mindestens 8 Zeichen sind erforderlich." },
+        { status: 400 }
+      );
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(customerEmail.trim())) {
+      return NextResponse.json(
+        { error: "Die Kunden-E-Mail sieht ungültig aus." },
         { status: 400 }
       );
     }
@@ -125,14 +175,14 @@ export async function POST(request: Request) {
       customerId = created.user.id;
     }
 
-    // 5. Website anlegen
+    // 5. Website anlegen (nur geprüfte Werte – siehe Formatprüfung oben)
     const { data: site, error: siteError } = await supabaseAdmin
       .from("sites")
       .insert({
-        name: name.trim(),
-        repo_owner: repoOwner.trim(),
-        repo_name: repoName.trim(),
-        preview_url: previewUrl.trim(),
+        name: name.trim().slice(0, 200),
+        repo_owner: owner,
+        repo_name: repo,
+        preview_url: previewUrlChecked.toString(),
       })
       .select()
       .single();
