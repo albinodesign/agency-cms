@@ -1,11 +1,10 @@
 import { NextResponse } from "next/server";
 import { streamText, stepCountIs, convertToModelMessages } from "ai";
 import type { UIMessage } from "ai";
-import { createClient } from "@/lib/supabase/server";
+import { requireSiteAccess } from "@/lib/auth";
 import { createOctokit, getManifestRaw, getRepoFile, normalizeManifest } from "@/lib/github";
 import { AI_MAX_STEPS, AiFieldContext, buildSystemPrompt, getAiModel, getAiModelId } from "@/lib/ai";
 import { buildAiTools } from "@/lib/ai-tools";
-import type { Site } from "@/types/cms";
 
 /** Ordnet einen OpenRouter-Fehler auf eine deutsche Kunden-Meldung zu. */
 function mapAiError(err: unknown): { message: string; status: number } {
@@ -81,29 +80,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Nachricht ist leer." }, { status: 400 });
   }
 
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Nicht authentifiziert." }, { status: 401 });
-  }
-
-  // Zugriff + KI-Freischaltung prüfen
-  const { data: assignment } = await supabase
-    .from("user_sites")
-    .select("site_id")
-    .eq("user_id", user.id)
-    .eq("site_id", siteId)
-    .maybeSingle();
-  if (!assignment) {
-    return NextResponse.json({ error: "Kein Zugriff auf diese Website." }, { status: 403 });
-  }
-  const { data: siteRow } = await supabase.from("sites").select("*").eq("id", siteId).single();
-  const site = siteRow as Site | null;
-  if (!site) {
-    return NextResponse.json({ error: "Website nicht gefunden." }, { status: 404 });
-  }
+  // Zugriff + KI-Freischaltung prüfen (zentral: src/lib/auth.ts)
+  const access = await requireSiteAccess(siteId);
+  if (!access.ok) return access.error;
+  const { supabase, user, site } = access;
   if (!site.ai_enabled) {
     return NextResponse.json(
       { error: "Der KI-Chat ist für diese Website nicht freigeschaltet." },

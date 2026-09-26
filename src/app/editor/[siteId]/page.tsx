@@ -67,30 +67,50 @@ export default async function EditorPage({ params }: EditorPageProps) {
     const octokit = createOctokit();
     manifest = await getManifest(octokit, typedSite.repo_owner, typedSite.repo_name);
 
-    // Alle referenzierten Content-Dateien einmalig laden – strikt nur .json,
-    // damit z. B. Markdown-Dateien aus src/content/blog/ niemals an JSON.parse gehen
+    // Alle referenzierten Content-Dateien laden – strikt nur .json,
+    // damit z. B. Markdown-Dateien aus src/content/blog/ niemals an JSON.parse gehen.
+    // W5: Parallel statt seriell (ein Abruf pro Datei, keine N-fache Wartezeit).
     const filePaths = [
       ...new Set(
         manifest.sections.flatMap((s) => s.fields.map((f) => f.file))
       ),
     ].filter((f) => f.endsWith(".json"));
+    // site.json immer mitladen (für den Banner-Schnellschalter unten) –
+    // ein Abruf im selben parallelen Satz statt zweitem Octokit.
+    // Ein Fehlschlag dort warnt nur, wenn das Manifest die Datei referenziert
+    // (sonst wäre es eine Geister-Meldung für eine optionale Datei).
+    const manifestPaths = new Set(filePaths);
+    if (!filePaths.includes("src/content/site.json")) {
+      filePaths.push("src/content/site.json");
+    }
     const fileContents = new Map<string, Record<string, unknown>>();
     const failedFiles: string[] = [];
 
-    for (const filePath of filePaths) {
-      try {
-        const { text } = await getRepoFile(
-          octokit,
-          typedSite.repo_owner,
-          typedSite.repo_name,
-          filePath
-        );
-        fileContents.set(filePath, JSON.parse(text) as Record<string, unknown>);
-      } catch (err) {
-        failedFiles.push(filePath);
+    const loaded = await Promise.all(
+      filePaths.map(async (filePath) => {
+        try {
+          const { text } = await getRepoFile(
+            octokit,
+            typedSite.repo_owner,
+            typedSite.repo_name,
+            filePath
+          );
+          return { filePath, json: JSON.parse(text) as Record<string, unknown> };
+        } catch (err) {
+          console.error(
+            `Content-Datei "${filePath}" konnte nicht geladen werden:`,
+            err instanceof Error ? err.message : err
+          );
+          return { filePath, json: null };
+        }
+      })
+    );
+    for (const { filePath, json } of loaded) {
+      if (json) fileContents.set(filePath, json);
+      else if (manifestPaths.has(filePath)) failedFiles.push(filePath);
+      else {
         console.error(
-          `Content-Datei "${filePath}" konnte nicht geladen werden:`,
-          err instanceof Error ? err.message : err
+          `Optionale Datei "src/content/site.json" konnte nicht geladen werden (kein Banner-Seed).`
         );
       }
     }
@@ -118,32 +138,22 @@ export default async function EditorPage({ params }: EditorPageProps) {
     // Banner-Schnellschalter: Live-Werte aus site.json seeden (auch ohne Manifest-Felder),
     // damit Schalter, Undo und Diff von Anfang an den echten Stand zeigen.
     // Die Datei liegt flach (banner.enabled) – getSite() liefert sie direkt als "site".
-    try {
-      const bannerOctokit = createOctokit();
-      const { text: siteText } = await getRepoFile(
-        bannerOctokit,
-        typedSite.repo_owner,
-        typedSite.repo_name,
-        "src/content/site.json"
-      );
-      const siteData = JSON.parse(siteText) as Record<string, unknown>;
-      const bannerData =
-        siteData && typeof siteData.banner === "object" && siteData.banner !== null
-          ? (siteData.banner as Record<string, unknown>)
-          : null;
-      if (bannerData) {
-        if (typeof bannerData.enabled === "boolean") {
-          liveValues["json:src/content/site.json:banner.enabled"] = String(bannerData.enabled);
-        }
-        if (typeof bannerData.variant === "string") {
-          liveValues["json:src/content/site.json:banner.variant"] = bannerData.variant;
-        }
-        if (typeof bannerData.text === "string") {
-          liveValues["json:src/content/site.json:banner.text"] = bannerData.text;
-        }
+    // W5: Bereits geladenen Stand wiederverwenden (kein zweiter Abruf derselben Datei).
+    const siteData = fileContents.get("src/content/site.json");
+    const bannerData =
+      siteData && typeof siteData.banner === "object" && siteData.banner !== null
+        ? (siteData.banner as Record<string, unknown>)
+        : null;
+    if (bannerData) {
+      if (typeof bannerData.enabled === "boolean") {
+        liveValues["json:src/content/site.json:banner.enabled"] = String(bannerData.enabled);
       }
-    } catch {
-      // Kein Banner in site.json – Schalter startet neutral (aus/leer)
+      if (typeof bannerData.variant === "string") {
+        liveValues["json:src/content/site.json:banner.variant"] = bannerData.variant;
+      }
+      if (typeof bannerData.text === "string") {
+        liveValues["json:src/content/site.json:banner.text"] = bannerData.text;
+      }
     }
   } catch (err) {
     manifestError =

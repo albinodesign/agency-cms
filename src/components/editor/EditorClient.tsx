@@ -3,10 +3,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
-import { ImageField } from "@/components/editor/ImageField";
 import { HistoryDrawer } from "@/components/editor/HistoryDrawer";
 import { ChatDrawer } from "@/components/editor/ChatDrawer";
 import { BlogPanel } from "@/components/editor/BlogPanel";
+import { StatusBadge } from "@/components/editor/StatusBadge";
+import type { SaveStatus } from "@/components/editor/StatusBadge";
+import { BannerCard } from "@/components/editor/BannerCard";
+import { FieldEditor } from "@/components/editor/FieldEditor";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -16,14 +19,12 @@ import {
   ChevronsUpDown,
   Copy,
   Download,
-  Eye,
   FileText,
   History,
   Loader2,
   Monitor,
   Newspaper,
   Rocket,
-  RotateCcw,
   Search,
   Smartphone,
   Sparkles,
@@ -37,7 +38,6 @@ import type {
   Site,
 } from "@/types/cms";
 
-type SaveStatus = "live" | "saving" | "saved";
 type Viewport = "desktop" | "mobile";
 
 interface EditorClientProps {
@@ -1473,291 +1473,6 @@ export function EditorClient({
           </div>
         ))}
       </div>
-    </div>
-  );
-}
-
-function StatusBadge({
-  status,
-  hasDrafts,
-  draftCount,
-  onOpenDiff,
-}: {
-  status: SaveStatus;
-  hasDrafts: boolean;
-  draftCount: number;
-  /** Wenn gesetzt: Badge ist anklickbar und öffnet den Diff-Inspektor */
-  onOpenDiff?: () => void;
-}) {
-  if (status === "saving") {
-    return (
-      <span className="flex items-center gap-1.5 text-xs font-medium text-zinc-500">
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        Speichern …
-      </span>
-    );
-  }
-  if (status === "saved" || hasDrafts) {
-    const label = `Entwurf gesichert (${draftCount} ungespeicherte Änderung${draftCount === 1 ? "" : "en"})`;
-    if (onOpenDiff) {
-      return (
-        <button
-          onClick={onOpenDiff}
-          title="Ausstehende Änderungen prüfen"
-          className="flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 transition hover:bg-amber-100"
-        >
-          <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-          {label}
-          <Eye className="h-3.5 w-3.5" />
-        </button>
-      );
-    }
-    return (
-      <span className="flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
-        <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-        {label}
-      </span>
-    );
-  }
-  return (
-    <span className="flex items-center gap-1.5 rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-600">
-      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
-      Bereit – Keine ungespeicherten Änderungen
-    </span>
-  );
-}
-
-/** Unaufdringlicher Zurücksetzen-Knopf pro Feld (Undo auf Live-Stand). */
-function UndoButton({ onUndo }: { onUndo: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onUndo}
-      title="Auf Live-Stand zurücksetzen"
-      className="rounded-md p-1 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700"
-    >
-      <RotateCcw className="h-3.5 w-3.5" />
-    </button>
-  );
-}
-
-const BANNER_FILE = "src/content/site.json";
-// Pfade OHNE "site."-Vorsatz: site.json liegt flach (banner.enabled),
-// die Website liest sie als site.banner (getSite liefert die Datei direkt)
-const BANNER_ENABLED_ID = `json:${BANNER_FILE}:banner.enabled`;
-const BANNER_VARIANT_ID = `json:${BANNER_FILE}:banner.variant`;
-const BANNER_TEXT_ID = `json:${BANNER_FILE}:banner.text`;
-
-const BANNER_VARIANTS = [
-  { id: "vacation", label: "🟡 Betriebsurlaub", pill: "bg-amber-500 text-white border-amber-500" },
-  { id: "emergency", label: "🔴 Dringend / Notfall", pill: "bg-red-500 text-white border-red-500" },
-  { id: "info", label: "🔵 Information", pill: "bg-blue-500 text-white border-blue-500" },
-] as const;
-
-/** Hinweis- & Urlaubsbanner: Schalter, Stil und Text – schreibt direkt Entwürfe. */
-function BannerCard({
-  values,
-  onChange,
-}: {
-  values: DraftMap;
-  onChange: (fieldId: string, value: string) => void;
-}) {
-  const enabled = (values[BANNER_ENABLED_ID] ?? "") === "true";
-  const variant = values[BANNER_VARIANT_ID] ?? "vacation";
-  const text = values[BANNER_TEXT_ID] ?? "";
-
-  return (
-    <div className="mb-4 rounded-2xl border border-zinc-200 bg-zinc-50/50 p-4">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm font-semibold text-zinc-900">
-          Hinweisbanner auf der Website anzeigen
-        </p>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={enabled}
-          onClick={() => onChange(BANNER_ENABLED_ID, enabled ? "false" : "true")}
-          className={`relative h-6 w-11 shrink-0 rounded-full transition ${
-            enabled ? "bg-emerald-500" : "bg-zinc-300"
-          }`}
-        >
-          <span
-            className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
-              enabled ? "left-[22px]" : "left-0.5"
-            }`}
-          />
-        </button>
-      </div>
-      <p className={`mt-0.5 text-xs font-medium ${enabled ? "text-emerald-700" : "text-zinc-400"}`}>
-        {enabled ? "AN" : "AUS"}
-      </p>
-
-      {enabled && (
-        <div className="mt-3 space-y-3">
-          <div className="flex flex-wrap gap-2">
-            {BANNER_VARIANTS.map((v) => {
-              const active = variant === v.id;
-              return (
-                <button
-                  key={v.id}
-                  type="button"
-                  onClick={() => onChange(BANNER_VARIANT_ID, v.id)}
-                  className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
-                    active
-                      ? v.pill
-                      : "border-zinc-300 bg-white text-zinc-600 hover:bg-zinc-100"
-                  }`}
-                >
-                  {v.label}
-                </button>
-              );
-            })}
-          </div>
-          <div>
-            <input
-              type="text"
-              value={text}
-              maxLength={160}
-              onChange={(e) => onChange(BANNER_TEXT_ID, e.target.value)}
-              placeholder="Wir sind vom 01. bis 15. August im Betriebsurlaub."
-              className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10"
-            />
-            <p className="mt-1 text-right text-xs text-zinc-400">
-              {text.length} / 160 Zeichen
-            </p>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function FieldEditor({
-  field,
-  value,
-  siteId,
-  onChange,
-  onError,
-  selected,
-  changed,
-  onUndo,
-}: {
-  field: ManifestField;
-  value: string;
-  siteId: string;
-  onChange: (value: string) => void;
-  onError: (message: string) => void;
-  /** true wenn das Feld gerade per Klick in der Vorschau ausgewählt wurde */
-  selected: boolean;
-  /** true wenn der Wert vom Live-Stand abweicht (Undo anbieten) */
-  changed: boolean;
-  onUndo: () => void;
-}) {
-  const baseClass =
-    "w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10";
-
-  const counter = field.maxLength
-    ? `${value.length} / ${field.maxLength} Zeichen`
-    : `${value.length} Zeichen`;
-  const counterTooLong = field.maxLength != null && value.length > field.maxLength;
-
-  // Anker-ID für "Klick in Vorschau springt hierher" + kurze Gelb-Markierung
-  return (
-    <div
-      id={`cms-field-${field.id}`}
-      className={`scroll-mt-4 rounded-xl transition ${
-        selected ? "bg-blue-50 p-3 ring-2 ring-blue-600" : ""
-      }`}
-    >
-      {field.type === "image" ? (
-        <>
-          {changed && (
-            <div className="mb-2 flex justify-end">
-              <UndoButton onUndo={onUndo} />
-            </div>
-          )}
-          <ImageField
-            field={field}
-            value={value}
-            siteId={siteId}
-            onChange={onChange}
-            onError={onError}
-          />
-        </>
-      ) : (
-        <div>
-          <div className="mb-1.5 flex items-center justify-between gap-2">
-            <label className="block text-sm font-medium text-zinc-700">
-              {field.label}
-            </label>
-            {changed && <UndoButton onUndo={onUndo} />}
-          </div>
-
-          {field.type === "text" && (
-            <input
-              type="text"
-              value={value}
-              placeholder={field.placeholder}
-              maxLength={field.maxLength}
-              onChange={(e) => onChange(e.target.value)}
-              className={baseClass}
-            />
-          )}
-
-          {["number", "email", "phone", "url", "date"].includes(field.type) && (
-            <input
-              type={field.type === "phone" ? "tel" : field.type}
-              value={value}
-              placeholder={field.placeholder}
-              maxLength={field.maxLength}
-              onChange={(e) => onChange(e.target.value)}
-              className={baseClass}
-            />
-          )}
-
-          {field.type === "textarea" && (
-            <textarea
-              value={value}
-              placeholder={field.placeholder}
-              maxLength={field.maxLength}
-              onChange={(e) => onChange(e.target.value)}
-              rows={4}
-              className={`${baseClass} resize-y`}
-            />
-          )}
-
-          {field.type === "boolean" && (
-            <button
-              type="button"
-              role="switch"
-              aria-checked={value === "true"}
-              onClick={() => onChange(value === "true" ? "false" : "true")}
-              className={`relative h-6 w-11 shrink-0 rounded-full transition ${
-                value === "true" ? "bg-emerald-500" : "bg-zinc-300"
-              }`}
-            >
-              <span
-                className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
-                  value === "true" ? "left-[22px]" : "left-0.5"
-                }`}
-              />
-            </button>
-          )}
-          {field.type === "boolean" && (
-            <p className={`mt-1 text-xs font-medium ${value === "true" ? "text-emerald-700" : "text-zinc-400"}`}>
-              {value === "true" ? "AN" : "AUS"}
-            </p>
-          )}
-
-          <p
-            className={`mt-1 text-right text-xs ${
-              counterTooLong ? "font-medium text-red-600" : "text-zinc-400"
-            }`}
-          >
-            {counter}
-          </p>
-        </div>
-      )}
     </div>
   );
 }

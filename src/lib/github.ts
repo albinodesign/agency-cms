@@ -25,6 +25,71 @@ function isNotFoundError(err: unknown): boolean {
   );
 }
 
+/** Erkennt Versionskonflikte (paralleler Push) anhand der GitHub-Meldung. */
+export function isShaConflictError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /409|sha|conflict|does not match|stale|veraltet/i.test(msg);
+}
+
+export interface FileCommit {
+  /** Dateipfad im Repo */
+  file: string;
+  /** Neuer Datei-Inhalt (UTF-8-Text) */
+  text: string;
+  /** Zuletzt gelesener SHA ("" = neue Datei) */
+  sha: string;
+}
+
+export type CommitResult =
+  | { ok: true; sha: string | null }
+  | { ok: false; error: string };
+
+/**
+ * Committet eine Datei auf main (W3, gemeinsam für Publish und Rollback).
+ * Bei SHA-Konflikt wird der frische Stand einmal über reloadSha() geladen
+ * und erneut versucht – erst danach gilt der Commit als fehlgeschlagen.
+ */
+export async function commitFileWithRetry(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  message: string,
+  commit: FileCommit,
+  reloadSha: () => Promise<string>
+): Promise<CommitResult> {
+  let sha = commit.sha;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const { data } = await octokit.repos.createOrUpdateFileContents({
+        owner,
+        repo,
+        path: commit.file,
+        message,
+        content: Buffer.from(commit.text, "utf-8").toString("base64"),
+        ...(sha ? { sha } : {}),
+        branch: "main",
+      });
+      return { ok: true, sha: data.commit.sha ?? null };
+    } catch (err) {
+      if (attempt === 0 && isShaConflictError(err)) {
+        try {
+          sha = await reloadSha();
+          continue;
+        } catch {
+          // Frisches Laden scheiterte ebenfalls – unten als Fehler melden
+        }
+      }
+      return {
+        ok: false,
+        error: `GitHub-Commit für "${commit.file}" fehlgeschlagen: ${
+          err instanceof Error ? err.message : "Unbekannter Fehler"
+        }`,
+      };
+    }
+  }
+  return { ok: false, error: `GitHub-Commit für "${commit.file}" fehlgeschlagen.` };
+}
+
 /** Lädt eine Datei aus dem Repo und dekodiert sie (Base64 -> UTF-8). */
 export async function getRepoFile(
   octokit: Octokit,

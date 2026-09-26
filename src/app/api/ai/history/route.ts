@@ -1,36 +1,21 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { requireSiteAccess } from "@/lib/auth";
 
 /** Liefert das letzte Gespräch einer Website mit Nachrichten (zum Fortsetzen). */
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const siteId = searchParams.get("siteId");
-  if (!siteId) {
-    return NextResponse.json({ error: "siteId fehlt." }, { status: 400 });
-  }
 
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Nicht authentifiziert." }, { status: 401 });
-  }
-
-  const { data: assignment } = await supabase
-    .from("user_sites")
-    .select("site_id")
-    .eq("user_id", user.id)
-    .eq("site_id", siteId)
-    .maybeSingle();
-  if (!assignment) {
-    return NextResponse.json({ error: "Kein Zugriff auf diese Website." }, { status: 403 });
-  }
+  // Zugriff prüfen (zentral: Session + user_sites + Site, src/lib/auth.ts)
+  const access = await requireSiteAccess(siteId);
+  if (!access.ok) return access.error;
+  const { supabase, site } = access;
+  const verifiedSiteId = site.id;
 
   const { data: conv } = await supabase
     .from("ai_conversations")
     .select("id,title,updated_at")
-    .eq("site_id", siteId)
+    .eq("site_id", verifiedSiteId)
     .order("updated_at", { ascending: false })
     .limit(1)
     .maybeSingle();

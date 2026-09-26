@@ -1,38 +1,15 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { requireAdmin } from "@/lib/auth";
 
 /** Löscht eine Website samt aller CMS-Daten (nur Agentur-Admins). */
 export async function POST(request: Request) {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json({ error: "Nicht authentifiziert." }, { status: 401 });
-    }
-
-    let supabaseAdmin;
-    try {
-      supabaseAdmin = createAdminClient();
-    } catch (err) {
-      return NextResponse.json(
-        { error: err instanceof Error ? err.message : "Server-Konfiguration fehlt." },
-        { status: 500 }
-      );
-    }
-
-    const { data: adminRow } = await supabaseAdmin
-      .from("admins")
-      .select("user_id")
-      .eq("user_id", user.id)
-      .maybeSingle();
-
-    if (!adminRow) {
-      return NextResponse.json({ error: "Keine Admin-Berechtigung." }, { status: 403 });
-    }
+    // Admin-Prüfung (zentral: Session + admins-Tabelle, src/lib/auth.ts).
+    // Hinweis: DB-Fehler bei der Prüfung geben jetzt 500 statt 403,
+    // damit Konfigurationsfehler nicht als „kein Admin" getarnt sind.
+    const access = await requireAdmin();
+    if (!access.ok) return access.error;
+    const { supabaseAdmin, user } = access;
 
     let body: { siteId?: string };
     try {

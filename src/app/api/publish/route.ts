@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import { createOctokit, getManifestRaw, getRepoFile, normalizeManifest } from "@/lib/github";
+import { requireSiteAccess } from "@/lib/auth";
+import {
+  commitFileWithRetry,
+  createOctokit,
+  getManifestRaw,
+  getRepoFile,
+  normalizeManifest,
+} from "@/lib/github";
 import { getBySegments, parsePathSafe, setByPath } from "@/lib/json-path";
 import { validateDraftValue, validateFinalJsonValue } from "@/lib/validate";
 import {
@@ -30,7 +36,7 @@ import {
   isAllowedContentPath,
   validateManifestText,
 } from "@/lib/ai";
-import type { CodeDraft, Draft, Site } from "@/types/cms";
+import type { CodeDraft, Draft } from "@/types/cms";
 import { FREE_DRAFT_PREFIX } from "@/types/cms";
 
 const COMMIT_MESSAGE = "cms: update content by client";
@@ -44,17 +50,122 @@ interface FileEdit {
   label: string;
 }
 
+interface CommitPhaseErgebnis {
+  committedFiles: string[];
+  committedFields: string[];
+  committedDraftIds: string[];
+  publishedFieldIds: string[];
+  commitFailed: Array<{ file: string; error: string }>;
+  lastCommitSha: string | null;
+}
+
+/**
+ * Phase „Commit" (W3): Schreibt alle geprüften Dateien je einzeln auf main.
+ * Schlägt ein Commit fehl, laufen die übrigen weiter (Teilveröffentlichung);
+ * bei SHA-Konflikt greift commitFileWithRetry (ein Retry mit frischem SHA).
+ * Fehlgeschlagene Dateien werden aus payload/finalContent entfernt.
+ */
+async function committeGepruefteDateien(args: {
+  octokit: ReturnType<typeof createOctokit>;
+  owner: string;
+  repo: string;
+  finalContent: Map<string, { text: string; kind: "json" | "text" }>;
+  baseFiles: Map<string, { text: string; sha: string }>;
+  editsByFile: Map<string, FileEdit[]>;
+  payload: Record<string, Record<string, unknown>>;
+}): Promise<CommitPhaseErgebnis> {
+  const { octokit, owner, repo, finalContent, baseFiles, editsByFile, payload } = args;
+  const committedFiles: string[] = [];
+  const committedFields: string[] = [];
+  const committedDraftIds: string[] = [];
+  const publishedFieldIds: string[] = [];
+  const commitFailed: Array<{ file: string; error: string }> = [];
+  let lastCommitSha: string | null = null;
+
+  for (const [filePath, final] of finalContent) {
+    const base = baseFiles.get(filePath)!;
+    const result = await commitFileWithRetry(
+      octokit,
+      owner,
+      repo,
+      COMMIT_MESSAGE,
+      { file: filePath, text: final.text, sha: base.sha },
+      async () => {
+        const fresh = await getRepoFile(octokit, owner, repo, filePath);
+        baseFiles.set(filePath, { text: fresh.text, sha: fresh.sha });
+        return fresh.sha;
+      }
+    );
+    if (!result.ok) {
+      commitFailed.push({ file: filePath, error: result.error });
+      delete payload[filePath];
+      finalContent.delete(filePath);
+      continue;
+    }
+    lastCommitSha = result.sha;
+    if (final.kind === "text") {
+      // Text-Dateien als Rohtext sichern (für echtes Wiederherstellen)
+      payload[filePath] = { __text: final.text };
+    }
+    committedFiles.push(filePath);
+    const edits = editsByFile.get(filePath) ?? [];
+    committedFields.push(...edits.map((e) => e.label));
+    committedDraftIds.push(...edits.map((e) => e.draftId));
+    publishedFieldIds.push(...edits.map((e) => e.fieldId));
+  }
+
+  return { committedFiles, committedFields, committedDraftIds, publishedFieldIds, commitFailed, lastCommitSha };
+}
+
+/**
+ * Phase „Antwort" (W3): Baut die ehrliche Erfolgsmeldung – unterscheidet
+ * klar zwischen vollständig und teils veröffentlicht (partial/failed).
+ */
+function baueErfolgsantwort(args: {
+  committedFiles: string[];
+  committedFields: string[];
+  publishedFieldIds: string[];
+  blocked: Map<string, string[]>;
+  commitFailed: Array<{ file: string; error: string }>;
+  skipped: string[];
+  cleanedAliases: number;
+  lastCommitSha: string | null;
+}) {
+  const { committedFiles, committedFields, publishedFieldIds, blocked, commitFailed, skipped, cleanedAliases, lastCommitSha } = args;
+  const skippedNote =
+    skipped.length > 0
+      ? ` ${skipped.length} Eintrag/Einträge ohne Zuordnung wurden übersprungen.`
+      : "";
+  const aliasNote =
+    cleanedAliases > 0
+      ? ` Gleichwertige Dubletten wurden mit aufgeräumt (${cleanedAliases}).`
+      : "";
+  const blockedList = [...blocked.entries()].map(([file, errors]) => ({ file, errors }));
+  const blockedNote =
+    blockedList.length > 0
+      ? ` Zurückgehalten: ${blockedList.map((b) => `${b.file} (${b.errors[0]})`).join("; ")}.`
+      : "";
+  const failedNote =
+    commitFailed.length > 0
+      ? ` Fehlgeschlagen: ${commitFailed.map((f) => `${f.file} (${f.error})`).join("; ")}.`
+      : "";
+  return {
+    message: `${committedFiles.length} Datei(en) veröffentlicht.${skippedNote}${aliasNote}${blockedNote}${failedNote}`,
+    publishedFields: committedFields,
+    publishedFiles: committedFiles,
+    publishedFieldIds,
+    blocked: blockedList,
+    failed: commitFailed,
+    // Ehrliche Unterscheidung – true, sobald etwas zurückgehalten wurde
+    // oder Commits fehlschlugen (Client zeigt dann Warnung statt Jubel).
+    partial: blockedList.length > 0 || commitFailed.length > 0,
+    // Echter Versions-Stempel für den Aufbau-Check (Vercel meldet den Bau-Status daran)
+    commitSha: lastCommitSha,
+  };
+}
+
 export async function POST(request: Request) {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json({ error: "Nicht authentifiziert." }, { status: 401 });
-    }
-
     let body: { siteId?: string };
     try {
       body = await request.json();
@@ -62,34 +173,13 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Ungültiger Request-Body." }, { status: 400 });
     }
 
-    const siteId = body.siteId;
-    if (!siteId || typeof siteId !== "string") {
-      return NextResponse.json({ error: "siteId fehlt." }, { status: 400 });
-    }
+    // Zugriff prüfen (zentral: Session + user_sites + Site, src/lib/auth.ts)
+    const access = await requireSiteAccess(body.siteId);
+    if (!access.ok) return access.error;
+    const { supabase, user, site } = access;
 
-    // Zugriff prüfen
-    const { data: assignment } = await supabase
-      .from("user_sites")
-      .select("site_id")
-      .eq("user_id", user.id)
-      .eq("site_id", siteId)
-      .maybeSingle();
-
-    if (!assignment) {
-      return NextResponse.json({ error: "Kein Zugriff auf diese Website." }, { status: 403 });
-    }
-
-    const { data: site, error: siteError } = await supabase
-      .from("sites")
-      .select("*")
-      .eq("id", siteId)
-      .single();
-
-    if (siteError || !site) {
-      return NextResponse.json({ error: "Website nicht gefunden." }, { status: 404 });
-    }
-
-    const typedSite = site as Site;
+    const siteId = site.id;
+    const typedSite = site;
 
     // Alle Entwürfe dieser Site laden (Formular + freie KI-Pfade)
     const { data: drafts, error: draftsError } = await supabase
@@ -400,12 +490,10 @@ export async function POST(request: Request) {
     // Neben den Entwurfs-Dateien werden alle erlaubten Manifestdateien geladen,
     // damit die Pfad-Existenz jedes Felds prüfbar ist. Unerlaubte Manifestziele
     // werden gar nicht erst aus dem Repo gelesen (sie landen als Fehler unten).
-    const committedFields: string[] = [];
-    const committedDraftIds: string[] = [];
-    const committedFiles: string[] = [];
-    const publishedFieldIds: string[] = [];
+    // (commit-Ergebnisse liefert die Commit-Phase unten; payload sammelt History.)
+    // (commit-Ergebnisse inkl. lastCommitSha liefert die Commit-Phase unten;
+    // payload sammelt den History-Snapshot.)
     const payload: Record<string, Record<string, unknown>> = {};
-    let lastCommitSha: string | null = null;
 
     const loadFiles = new Set<string>();
     for (const entry of extractRawFields(effectiveManifestRaw)) {
@@ -632,62 +720,16 @@ export async function POST(request: Request) {
     }
 
     // Phase 2: jetzt erst committen (alles wurde oben je Datei geprüft).
-    // Schlägt ein Commit fehl, laufen die übrigen weiter (Teilveröffentlichung).
-    // B5: Bei SHA-Konflikt (paralleler Push) einmal mit frischem SHA neu versuchen.
-    const commitFailed: Array<{ file: string; error: string }> = [];
-    const isShaConflict = (err: unknown): boolean => {
-      const msg = err instanceof Error ? err.message : String(err);
-      return /409|sha|conflict|does not match|stale|veraltet/i.test(msg);
-    };
-    for (const [filePath, final] of finalContent) {
-      let base = baseFiles.get(filePath)!;
-      let committed = false;
-      for (let attempt = 0; attempt < 2 && !committed; attempt += 1) {
-        try {
-          const { data: commitData } = await octokit.repos.createOrUpdateFileContents({
-            owner: typedSite.repo_owner,
-            repo: typedSite.repo_name,
-            path: filePath,
-            message: COMMIT_MESSAGE,
-            content: Buffer.from(final.text, "utf-8").toString("base64"),
-            ...(base.sha ? { sha: base.sha } : {}),
-            branch: "main",
-          });
-          lastCommitSha = commitData.commit.sha ?? null;
-          committed = true;
-        } catch (err) {
-          // Einmal neu laden + erneut versuchen, sonst als Fehlschlag werten
-          if (attempt === 0 && isShaConflict(err)) {
-            try {
-              const fresh = await getRepoFile(octokit, typedSite.repo_owner, typedSite.repo_name, filePath);
-              base = { text: fresh.text, sha: fresh.sha };
-              baseFiles.set(filePath, base);
-              continue;
-            } catch {
-              // Frisches Laden scheiterte ebenfalls – unten als Fehler melden
-            }
-          }
-          commitFailed.push({
-            file: filePath,
-            error: `GitHub-Commit für "${filePath}" fehlgeschlagen: ${
-              err instanceof Error ? err.message : "Unbekannter Fehler"
-            }`,
-          });
-          delete payload[filePath];
-          finalContent.delete(filePath);
-        }
-      }
-      if (!committed) continue;
-      if (final.kind === "text") {
-        // Text-Dateien als Rohtext sichern (für echtes Wiederherstellen)
-        payload[filePath] = { __text: final.text };
-      }
-      committedFiles.push(filePath);
-      const edits = editsByFile.get(filePath) ?? [];
-      committedFields.push(...edits.map((e) => e.label));
-      committedDraftIds.push(...edits.map((e) => e.draftId));
-      publishedFieldIds.push(...edits.map((e) => e.fieldId));
-    }
+    const commit = await committeGepruefteDateien({
+      octokit,
+      owner: typedSite.repo_owner,
+      repo: typedSite.repo_name,
+      finalContent,
+      baseFiles,
+      editsByFile,
+      payload,
+    });
+    const { committedFiles, committedFields, committedDraftIds, publishedFieldIds, commitFailed, lastCommitSha } = commit;
 
     // Snapshot in publish_history speichern (vollständiger Stand pro Datei)
     const { error: historyError } = await supabase.from("publish_history").insert({
@@ -764,37 +806,16 @@ export async function POST(request: Request) {
       }
     }
 
-    const skippedNote =
-      skipped.length > 0
-        ? ` ${skipped.length} Eintrag/Einträge ohne Zuordnung wurden übersprungen.`
-        : "";
-    const aliasNote =
-      cleanedAliases > 0
-        ? ` Gleichwertige Dubletten wurden mit aufgeräumt (${cleanedAliases}).`
-        : "";
-    const blockedList = [...blocked.entries()].map(([file, errors]) => ({ file, errors }));
-    const blockedNote =
-      blockedList.length > 0
-        ? ` Zurückgehalten: ${blockedList.map((b) => `${b.file} (${b.errors[0]})`).join("; ")}.`
-        : "";
-    const failedNote =
-      commitFailed.length > 0
-        ? ` Fehlgeschlagen: ${commitFailed.map((f) => `${f.file} (${f.error})`).join("; ")}.`
-        : "";
-
-    return NextResponse.json({
-      message: `${committedFiles.length} Datei(en) veröffentlicht.${skippedNote}${aliasNote}${blockedNote}${failedNote}`,
-      publishedFields: committedFields,
-      publishedFiles: committedFiles,
+    return NextResponse.json(baueErfolgsantwort({
+      committedFiles,
+      committedFields,
       publishedFieldIds,
-      blocked: blockedList,
-      failed: commitFailed,
-      // B5: Ehrliche Unterscheidung – true, sobald etwas zurückgehalten wurde
-      // oder Commits fehlschlugen (Client zeigt dann Warnung statt Jubel).
-      partial: blockedList.length > 0 || commitFailed.length > 0,
-      // Echter Versions-Stempel für den Aufbau-Check (Vercel meldet den Bau-Status daran)
-      commitSha: lastCommitSha,
-    });
+      blocked,
+      commitFailed,
+      skipped,
+      cleanedAliases,
+      lastCommitSha,
+    }));
   } catch (err) {
     console.error("Publish fehlgeschlagen:", err);
     return NextResponse.json(

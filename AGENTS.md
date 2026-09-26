@@ -68,12 +68,14 @@ src/
 │       ├── admin/delete-site/  # Site + CMS-Daten löschen (nur Admins, Rest per Cascade; Repo/Login bleiben)
 │       └── admin/toggle-ai/    # KI-Chat pro Site an/aus (nur Admins)
 ├── components/
-│   ├── editor/              # EditorClient, ImageField, HistoryDrawer, BlogPanel, BlogEditorModal
+│   ├── editor/              # EditorClient, StatusBadge, UndoButton, BannerCard, FieldEditor, ImageField, HistoryDrawer, BlogPanel, BlogEditorModal
 │   ├── DashboardClient.tsx, CreateSiteModal.tsx, LogoutButton.tsx
 ├── lib/
-│   ├── github.ts            # Octokit-Factory, Manifest laden/normalisieren, Repo-Dateien lesen (Base64 → UTF-8)
+│   ├── auth.ts              # Zentrale Zugriffsprüfung (requireSiteAccess, requireAdmin) für alle API-Routen
+│   ├── github.ts            # Octokit-Factory, Manifest laden/normalisieren, Repo-Dateien lesen (Base64 → UTF-8), commitFileWithRetry (ein SHA-Retry)
 │   ├── json-path.ts         # getByPath/setByPath (Dot-Paths, setByPath legt fehlende Ebenen an)
-│   ├── content-guard.ts     # Gemeinsame Inhaltsprüfung für Publish + Chat (Zielauflösung, Umwandlung, Banner, Listenmodelle, Kandidaten-Struktur)
+│   ├── content-guard.ts     # Barrel: re-exportiert content-guard/* (gleiche Namen, gleiche Funktionen)
+│   ├── content-guard/       # Aufgeteilte Inhaltsprüfung: base (Dateisperre/Ziele), banner, field-targets, free-drafts, list-models
 │   ├── ai-tools.ts          # KI-Werkzeuge (buildAiTools, testbar mit Adaptern; nutzt content-guard, speichert Entwürfe mit ehrlichen Hinweisen)
 │   ├── validate.ts          # Entwurfsprüfung (tolerante Strings) + strikte Endtypen (validateFinalJsonValue)
 │   ├── slugify.ts           # Slug-Erzeugung für Blog-Artikel

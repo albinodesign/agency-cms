@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import matter from "gray-matter";
-import { createClient } from "@/lib/supabase/server";
+import { requireSiteAccess } from "@/lib/auth";
 import { createOctokit } from "@/lib/github";
 import { slugify } from "@/lib/slugify";
-import type { BlogPost, Site } from "@/types/cms";
+import type { BlogPost } from "@/types/cms";
 import type { Octokit } from "@octokit/rest";
 
 const BLOG_DIR = "src/content/blog";
@@ -15,44 +15,8 @@ function isValidBlogPath(path: string): boolean {
   return !path.includes("..") && VALID_BLOG_PATH.test(path);
 }
 
-/** Session + Site-Zugriff prüfen, liefert die Site oder eine Fehler-Response. */
-async function authorize(siteId: string | null) {
-  if (!siteId) {
-    return { error: NextResponse.json({ error: "siteId fehlt." }, { status: 400 }) };
-  }
-
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    return { error: NextResponse.json({ error: "Nicht authentifiziert." }, { status: 401 }) };
-  }
-
-  const { data: assignment } = await supabase
-    .from("user_sites")
-    .select("site_id")
-    .eq("user_id", user.id)
-    .eq("site_id", siteId)
-    .maybeSingle();
-
-  if (!assignment) {
-    return { error: NextResponse.json({ error: "Kein Zugriff auf diese Website." }, { status: 403 }) };
-  }
-
-  const { data: site, error: siteError } = await supabase
-    .from("sites")
-    .select("*")
-    .eq("id", siteId)
-    .single();
-
-  if (siteError || !site) {
-    return { error: NextResponse.json({ error: "Website nicht gefunden." }, { status: 404 }) };
-  }
-
-  return { site: site as Site };
-}
+/** Session + Site-Zugriff prüfen (zentral in src/lib/auth.ts). */
+const authorize = requireSiteAccess;
 
 function isNotFound(err: unknown): boolean {
   return (
@@ -133,7 +97,7 @@ export async function GET(request: Request) {
   const path = searchParams.get("path");
 
   const auth = await authorize(siteId);
-  if ("error" in auth) return auth.error;
+  if (!auth.ok) return auth.error;
 
   try {
     const octokit = createOctokit();
@@ -194,7 +158,7 @@ export async function POST(request: Request) {
   }
 
   const auth = await authorize(body.siteId ?? null);
-  if ("error" in auth) return auth.error;
+  if (!auth.ok) return auth.error;
 
   const slug = slugify(body.slug ?? "");
   if (!slug) {
@@ -282,7 +246,7 @@ export async function DELETE(request: Request) {
   }
 
   const auth = await authorize(body.siteId ?? null);
-  if ("error" in auth) return auth.error;
+  if (!auth.ok) return auth.error;
 
   const { path, sha } = body;
   if (!path || !sha) {

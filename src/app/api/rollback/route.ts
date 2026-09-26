@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import { createOctokit, getManifest } from "@/lib/github";
+import { requireSiteAccess } from "@/lib/auth";
+import { commitFileWithRetry, createOctokit, getManifest, getRepoFile } from "@/lib/github";
 import { AI_MAX_FILE_CHARS, breaksBridge, isAllowedCodePath, isAllowedContentPath } from "@/lib/ai";
 import {
   SITE_JSON,
@@ -8,7 +8,7 @@ import {
   getBannerProblems,
   parseFreeDraftIdSafe,
 } from "@/lib/content-guard";
-import type { Draft, PublishHistoryEntry, Site } from "@/types/cms";
+import type { Draft, PublishHistoryEntry } from "@/types/cms";
 import { FREE_DRAFT_PREFIX } from "@/types/cms";
 
 const COMMIT_MESSAGE = "cms: rollback to historical version";
@@ -46,15 +46,6 @@ function isValidPayload(payload: unknown): payload is Payload {
 
 export async function POST(request: Request) {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json({ error: "Nicht authentifiziert." }, { status: 401 });
-    }
-
     let body: { siteId?: string; historyId?: string };
     try {
       body = await request.json();
@@ -62,37 +53,18 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Ungültiger Request-Body." }, { status: 400 });
     }
 
-    const { siteId, historyId } = body;
-    if (!siteId) {
-      return NextResponse.json({ error: "siteId fehlt." }, { status: 400 });
-    }
+    const { siteId: requestedSiteId, historyId } = body;
     if (!historyId) {
       return NextResponse.json({ error: "historyId fehlt." }, { status: 400 });
     }
 
-    // Zugriff prüfen
-    const { data: assignment } = await supabase
-      .from("user_sites")
-      .select("site_id")
-      .eq("user_id", user.id)
-      .eq("site_id", siteId)
-      .maybeSingle();
+    // Zugriff prüfen (zentral: Session + user_sites + Site, src/lib/auth.ts)
+    const access = await requireSiteAccess(requestedSiteId);
+    if (!access.ok) return access.error;
+    const { supabase, user, site } = access;
 
-    if (!assignment) {
-      return NextResponse.json({ error: "Kein Zugriff auf diese Website." }, { status: 403 });
-    }
-
-    const { data: site, error: siteError } = await supabase
-      .from("sites")
-      .select("*")
-      .eq("id", siteId)
-      .single();
-
-    if (siteError || !site) {
-      return NextResponse.json({ error: "Website nicht gefunden." }, { status: 404 });
-    }
-
-    const typedSite = site as Site;
+    const siteId = site.id;
+    const typedSite = site;
 
     // Payload ausschließlich serverseitig über historyId aus publish_history laden
     const { data: entry, error: entryError } = await supabase
@@ -238,44 +210,25 @@ export async function POST(request: Request) {
         continue;
       }
 
-      let done = false;
-      for (let attempt = 0; attempt < 2 && !done; attempt += 1) {
-        try {
-          const { data: commitData } = await octokit.repos.createOrUpdateFileContents({
-            owner: typedSite.repo_owner,
-            repo: typedSite.repo_name,
-            path: filePath,
-            message: COMMIT_MESSAGE,
-            content: Buffer.from(newText, "utf-8").toString("base64"),
-            sha: currentSha as string,
-            branch: "main",
-          });
-          lastCommitSha = commitData.commit.sha ?? null;
-          done = true;
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          const looksLikeConflict = /409|sha|conflict|does not match|stale|veraltet/i.test(message);
-          if (attempt === 0 && looksLikeConflict) {
-            try {
-              const { data } = await octokit.repos.getContent({
-                owner: typedSite.repo_owner,
-                repo: typedSite.repo_name,
-                path: filePath,
-                ref: "main",
-              });
-              if (!Array.isArray(data) && data.type === "file") {
-                currentSha = data.sha;
-                continue;
-              }
-            } catch {
-              // Frisches Laden scheiterte – unten als Fehler melden
-            }
-          }
-          console.error(`Rollback: Commit für "${filePath}" fehlgeschlagen:`, message);
-          failedFiles.push({ file: filePath, error: `GitHub-Fehler beim Committen: ${message}` });
+      // Commit über den gemeinsamen Helfer (ein Retry bei SHA-Konflikt, W3)
+      const commitResult = await commitFileWithRetry(
+        octokit,
+        typedSite.repo_owner,
+        typedSite.repo_name,
+        COMMIT_MESSAGE,
+        { file: filePath, text: newText, sha: currentSha as string },
+        async () => {
+          const fresh = await getRepoFile(octokit, typedSite.repo_owner, typedSite.repo_name, filePath);
+          return fresh.sha;
         }
+      );
+      if (!commitResult.ok) {
+        console.error(`Rollback: Commit für "${filePath}" fehlgeschlagen:`, commitResult.error);
+        failedFiles.push({ file: filePath, error: commitResult.error.replace(/^GitHub-Commit für "[^"]+" fehlgeschlagen: /, "GitHub-Fehler beim Committen: ") });
+        continue;
       }
-      if (done) restoredFiles.push(filePath);
+      lastCommitSha = commitResult.sha;
+      restoredFiles.push(filePath);
     }
 
     // Nichts zurückgerollt? Dann ehrlich melden – keine History, keine Löschung.

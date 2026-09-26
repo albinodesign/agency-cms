@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { requireAdmin } from "@/lib/auth";
 import type { Site } from "@/types/cms";
 
 interface CreateSiteBody {
@@ -14,45 +13,10 @@ interface CreateSiteBody {
 
 export async function POST(request: Request) {
   try {
-    // 1. Anfragenden Nutzer über die Session ermitteln
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json({ error: "Nicht authentifiziert." }, { status: 401 });
-    }
-
-    // 2. Admin-Check (via Service Role, umgeht RLS)
-    let supabaseAdmin;
-    try {
-      supabaseAdmin = createAdminClient();
-    } catch (err) {
-      return NextResponse.json(
-        { error: err instanceof Error ? err.message : "Server-Konfiguration fehlt." },
-        { status: 500 }
-      );
-    }
-
-    const { data: adminRow, error: adminError } = await supabaseAdmin
-      .from("admins")
-      .select("user_id")
-      .eq("user_id", user.id)
-      .maybeSingle();
-
-    if (adminError) {
-      return NextResponse.json(
-        { error: `Admin-Prüfung fehlgeschlagen: ${adminError.message}` },
-        { status: 500 }
-      );
-    }
-    if (!adminRow) {
-      return NextResponse.json(
-        { error: "Keine Admin-Berechtigung." },
-        { status: 403 }
-      );
-    }
+    // Admin-Prüfung (zentral: Session + admins-Tabelle, src/lib/auth.ts)
+    const access = await requireAdmin();
+    if (!access.ok) return access.error;
+    const { supabaseAdmin, user } = access;
 
     // 3. Eingaben validieren
     let body: CreateSiteBody;
