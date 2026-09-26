@@ -1,6 +1,6 @@
 "use client";
 
-import { getBannerProblems, validateBannerValue } from "@/lib/content-guard";
+import { BANNER_TEXT_MAX, getBannerProblems, validateBannerValue } from "@/lib/content-guard";
 import type { DraftMap } from "@/types/cms";
 
 const BANNER_FILE = "src/content/site.json";
@@ -87,7 +87,7 @@ export function BannerCard({
             <input
               type="text"
               value={text}
-              maxLength={160}
+              maxLength={BANNER_TEXT_MAX}
               onChange={(e) => onChange(BANNER_TEXT_ID, e.target.value)}
               placeholder="Wir sind vom 01. bis 15. August im Betriebsurlaub."
               aria-invalid={textFehler !== null}
@@ -98,7 +98,7 @@ export function BannerCard({
               }`}
             />
             <p className="mt-1 text-right text-xs text-zinc-400">
-              {text.length} / 160 Zeichen
+              {text.length} / {BANNER_TEXT_MAX} Zeichen
             </p>
             {textFehler && (
               <p role="alert" className="mt-1 text-xs font-medium text-red-600">

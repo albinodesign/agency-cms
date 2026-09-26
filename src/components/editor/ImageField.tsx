@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { ImagePlus, Loader2, UploadCloud } from "lucide-react";
+import { ImagePlus, Loader2, Trash2, UploadCloud } from "lucide-react";
 import type { ManifestField } from "@/types/cms";
 
 const BUCKET = "cms-media";
@@ -186,19 +186,32 @@ export function ImageField({
               ? "Bild wird verkleinert & hochgeladen …"
               : "Bild hierher ziehen oder"}
           </p>
-          <button
-            type="button"
-            disabled={uploading}
-            onClick={() => inputRef.current?.click()}
-            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-60"
-          >
-            {uploading ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <UploadCloud className="h-3.5 w-3.5" />
+          <div className="flex shrink-0 items-center gap-2">
+            {value && !uploading && (
+              <button
+                type="button"
+                onClick={() => onChange("")}
+                title="Bild entfernen (Feld leeren)"
+                className="flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-500 transition hover:bg-zinc-100 hover:text-red-600"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Leeren
+              </button>
             )}
-            Bild austauschen
-          </button>
+            <button
+              type="button"
+              disabled={uploading}
+              onClick={() => inputRef.current?.click()}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-60"
+            >
+              {uploading ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <UploadCloud className="h-3.5 w-3.5" />
+              )}
+              Bild austauschen
+            </button>
+          </div>
         </div>
 
         <input

@@ -212,7 +212,7 @@ export function appendContextFor(
  * einen neuen Blatt-Schlüssel am Listenende mit ausdrücklichem Modell.
  * Sonst null (kein Raten aus Geschwistertypen).
  */
-export function modelTypeForAppend(
+function modelTypeForAppend(
   file: string,
   segments: Array<string | number>,
   liveJson: Record<string, unknown> | undefined,

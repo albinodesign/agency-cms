@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { BlogEditorModal } from "@/components/editor/BlogEditorModal";
+import { formatKurzdatum as formatDate } from "@/lib/format";
 import {
   FileText,
   Loader2,
@@ -22,16 +23,6 @@ interface EditorState {
   content: string;
 }
 
-function formatDate(iso: string): string {
-  if (!iso) return "—";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleDateString("de-DE", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  });
-}
 
 /** Beiträge pro Seite in der Übersicht (W11: flüssig auch bei vielen Artikeln). */
 const POSTS_PER_PAGE = 20;

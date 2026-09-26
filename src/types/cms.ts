@@ -29,6 +29,11 @@ export interface ManifestSection {
   id: string;
   title: string;
   fields: ManifestField[];
+  /**
+   * Optionale Seitenzuordnung (N3): Wenn die Agentur sie pflegt, gruppiert
+   * der Editor danach statt nach Schlüsselwort-Heuristik.
+   */
+  page?: string;
 }
 
 export interface CmsManifest {

@@ -3,7 +3,7 @@
  * Gehört zu src/lib/content-guard.ts (Barrel) – keine Logik ändern.
  */
 import { getByPath } from "../json-path";
-import type { CmsManifest, FieldType, ManifestField } from "../../types/cms";
+import type { FieldType, ManifestField } from "../../types/cms";
 import {
   MANIFEST_PATH,
   MAX_MANIFEST_MAX_LENGTH,
@@ -152,26 +152,6 @@ export function validateFieldTargets(
   });
 
   return errors;
-}
-
-/** Sammelt die normierten Ziele aller gültigen Manifestfelder (für Free-Draft-Abgleich). */
-export function collectManifestTargets(rawFields: unknown[]): Map<string, string> {
-  const targets = new Map<string, string>();
-  for (const entry of rawFields) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const field = entry as RawField;
-    if (typeof field.id !== "string" || typeof field.file !== "string") continue;
-    if (!isAllowedFieldJsonFile(field.file)) continue;
-    const target =
-      typeof field.path === "string" ? canonicalTarget(field.file, field.path) : null;
-    if (target && !targets.has(target)) targets.set(target, field.id);
-  }
-  return targets;
-}
-
-/** Stellt sicher, dass ein Manifest-Objekt keine leere Feldliste versteckt. */
-export function manifestHasFields(manifest: CmsManifest): boolean {
-  return manifest.sections.some((s) => s.fields.length > 0);
 }
 
 /** Aufgelöster Zieltyp: Manifestfeld, Banner-Regel oder freier Text. */

@@ -104,8 +104,11 @@ function isSafeFieldId(fieldId: string): boolean {
   );
 }
 
-/** Ermittelt die Seite einer Sektion: erst ID/Titel, sonst Dateipfad der Felder. */
+/** Ermittelt die Seite einer Sektion (N3): erst Manifest-`page`, dann
+ * Schlüsselwort-Heuristik über ID/Titel, sonst Dateipfad der Felder. */
 function detectPageLabel(section: ManifestSection): string {
+  const gepflegt = section.page?.trim();
+  if (gepflegt) return gepflegt;
   const haystack = `${section.id} ${section.title}`;
   for (const [pattern, label] of PAGE_KEYWORDS) {
     if (pattern.test(haystack)) return label;
@@ -185,6 +188,8 @@ export function EditorClient({
   const [searchQuery, setSearchQuery] = useState("");
   const [activePageId, setActivePageId] = useState<string | null>(null);
   const [deployState, setDeployState] = useState<DeployState>("idle");
+  // N4: Zähler für den Aufbau-Fortschritt (Prüfung n/18)
+  const [deployTries, setDeployTries] = useState(0);
   // Handy-Ansicht: zwischen Formular und Vorschau umschalten (am PC immer Split-Screen)
   const [mobileView, setMobileView] = useState<"form" | "preview">("form");
   // Klick-Modus: true = Klick in der Vorschau sucht das Feld ("Finden"),
@@ -296,24 +301,34 @@ export function EditorClient({
     () => new Set(sections[0] ? [sections[0].id] : [])
   );
 
-  // Suche: Sektionen/Felder filtern (Label, Key oder Sektions-Titel)
+  // Suche (N3): Label, ID, Sektions-Titel/-Seite, Dateipfad UND aktuelle Werte.
   const filteredSections = useMemo<ManifestSection[]>(() => {
     const query = searchQuery.trim().toLowerCase();
     if (!query) return sections;
     return sections
       .map((section) => {
-        const sectionMatches = section.title.toLowerCase().includes(query);
+        const sectionMatches =
+          section.title.toLowerCase().includes(query) ||
+          (section.page ?? "").toLowerCase().includes(query);
         const fields = sectionMatches
           ? section.fields
           : (section.fields ?? []).filter(
               (f) =>
                 f.label.toLowerCase().includes(query) ||
-                f.id.toLowerCase().includes(query)
+                f.id.toLowerCase().includes(query) ||
+                f.file.toLowerCase().includes(query) ||
+                (values[f.id] ?? "").toLowerCase().includes(query)
             );
         return { ...section, fields };
       })
       .filter((s) => s.fields.length > 0);
-  }, [sections, searchQuery]);
+  }, [sections, searchQuery, values]);
+
+  // Trefferzahl für die Suche (N3)
+  const trefferZahl = useMemo(
+    () => filteredSections.reduce((sum, s) => sum + (s.fields?.length ?? 0), 0),
+    [filteredSections]
+  );
 
   // Sektionen nach Seiten gruppieren (Startseite, Leistungen, Kontakt, Firmendaten …)
   const pages = useMemo<PageGroup[]>(() => {
@@ -606,10 +621,12 @@ export function EditorClient({
         return;
       }
       setDeployState("building");
+      setDeployTries(0);
       const sha = body.commitSha;
       let tries = 0;
       const poll = async () => {
         tries += 1;
+        setDeployTries(tries);
         try {
           const statusRes = await fetch(
             `/api/site/${site.id}/deploy-status?sha=${encodeURIComponent(sha)}`
@@ -1050,7 +1067,7 @@ export function EditorClient({
           <div className="mx-auto max-w-xl px-6 py-6">
             {deployState !== "idle" && (
               <div
-                className={`mb-6 rounded-xl border px-4 py-3 text-sm ${
+                className={`sticky top-0 z-10 mb-6 rounded-xl border px-4 py-3 text-sm shadow-sm ${
                   deployState === "sending"
                     ? "border-amber-200 bg-amber-50 text-amber-800"
                     : deployState === "building" || deployState === "slow"
@@ -1077,8 +1094,20 @@ export function EditorClient({
                       </p>
                       <p className="mt-1 text-blue-700/80">
                         Ich prüfe den echten Stand und melde mich, sobald alles
-                        live ist – du musst nichts tun.
+                        live ist – du musst nichts tun. (Prüfung {Math.min(deployTries, 18)}/18)
                       </p>
+                      <div
+                        className="mt-2 h-1.5 overflow-hidden rounded-full bg-blue-200/70"
+                        role="progressbar"
+                        aria-valuemin={0}
+                        aria-valuemax={18}
+                        aria-valuenow={Math.min(deployTries, 18)}
+                      >
+                        <div
+                          className="h-full rounded-full bg-blue-600 transition-all"
+                          style={{ width: `${Math.min(100, (deployTries / 18) * 100)}%` }}
+                        />
+                      </div>
                     </div>
                     <button
                       onClick={() => setDeployState("idle")}
@@ -1262,10 +1291,15 @@ export function EditorClient({
                         type="text"
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        placeholder="Feld suchen …"
+                        placeholder="Feld suchen … (Name, Datei oder Inhalt)"
                         className="w-full rounded-lg border border-zinc-300 bg-white py-2 pl-9 pr-3 text-sm outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10"
                       />
                     </div>
+                    {isSearching && (
+                      <p className="text-xs text-zinc-500" role="status">
+                        {trefferZahl === 0 ? "Keine Treffer." : `${trefferZahl} Treffer`}
+                      </p>
+                    )}
                     <div className="flex justify-end gap-2">
                       <button
                         onClick={expandAll}

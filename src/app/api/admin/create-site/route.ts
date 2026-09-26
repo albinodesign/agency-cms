@@ -8,7 +8,6 @@ interface CreateSiteBody {
   repoOwner?: string;
   previewUrl?: string;
   customerEmail?: string;
-  customerPassword?: string;
 }
 
 export async function POST(request: Request) {
@@ -26,7 +25,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Ungültiger Request-Body." }, { status: 400 });
     }
 
-    const { name, repoName, repoOwner, previewUrl, customerEmail, customerPassword } = body;
+    const { name, repoName, repoOwner, previewUrl, customerEmail } = body;
 
     if (!name?.trim() || !repoName?.trim() || !repoOwner?.trim() || !previewUrl?.trim()) {
       return NextResponse.json(
@@ -78,9 +77,9 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-    if (!customerEmail?.trim() || !customerPassword || customerPassword.length < 8) {
+    if (!customerEmail?.trim()) {
       return NextResponse.json(
-        { error: "Kunden-E-Mail und ein Passwort mit mindestens 8 Zeichen sind erforderlich." },
+        { error: "Die Kunden-E-Mail fehlt." },
         { status: 400 }
       );
     }
@@ -91,14 +90,16 @@ export async function POST(request: Request) {
       );
     }
 
-    // 4. Kunden-Nutzer anlegen (oder bestehenden verwenden)
+    // 4. Kunden-Nutzer anlegen (oder bestehenden verwenden).
+    // N5: Kein Passwort mehr – der Kunde erhält einen Einladungs-Link und
+    // vergibt sein Passwort selbst. So steht nie ein Klartext-Passwort im
+    // Browser, in Logs oder in der Zwischenablage.
     const email = customerEmail.trim().toLowerCase();
     let customerId: string;
 
     const { data: created, error: createError } =
       await supabaseAdmin.auth.admin.createUser({
         email,
-        password: customerPassword,
         email_confirm: true,
       });
 
@@ -139,6 +140,20 @@ export async function POST(request: Request) {
       customerId = existing.id;
     } else {
       customerId = created.user.id;
+    }
+
+    // 4b. Einladungs-Link erzeugen (Magic-Link, läuft ab, einmaliger Einstieg)
+    const { data: einladungsDaten, error: einladungsFehler } = await supabaseAdmin.auth.admin.generateLink({
+      type: "magiclink",
+      email,
+    });
+    const inviteLink = (einladungsDaten as { properties?: { action_link?: string } } | null)?.properties?.action_link;
+    if (einladungsFehler || !inviteLink) {
+      console.error("create-site: Einladungs-Link fehlgeschlagen:", einladungsFehler?.message);
+      return NextResponse.json(
+        { error: "Nutzer wurde angelegt, aber der Einladungs-Link konnte nicht erzeugt werden. Details stehen im Server-Protokoll." },
+        { status: 500 }
+      );
     }
 
     // 5. Website anlegen (nur geprüfte Werte – siehe Formatprüfung oben)
@@ -186,7 +201,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       site: site as Site,
-      credentials: { email, password: customerPassword },
+      einladung: { email, link: inviteLink },
     });
   } catch (err) {
     console.error("create-site fehlgeschlagen:", err);

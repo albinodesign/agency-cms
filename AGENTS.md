@@ -86,6 +86,7 @@ src/
 │   ├── ai-tools.ts          # KI-Werkzeuge (buildAiTools, testbar mit Adaptern; nutzt content-guard, speichert Entwürfe mit ehrlichen Hinweisen)
 │   ├── ai.ts                # KI-Modell, Datei-/Geheimnis-/Brücken-Regeln, System-Prompt (Budget + Nachladewege)
 │   ├── validate.ts          # Entwurfsprüfung (tolerante Strings) + strikte Endtypen (validateFinalJsonValue)
+│   ├── format.ts            # Gemeinsame Datumsanzeige (Verlauf + Blog)
 │   ├── slugify.ts           # Slug-Erzeugung für Blog-Artikel
 │   └── supabase/            # server.ts, client.ts, middleware.ts, admin.ts, config.ts
 └── types/cms.ts             # Zentrale Typen (Manifest, Blog, Site, Draft, PublishHistoryEntry, DraftMap)

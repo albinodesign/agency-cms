@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { formatVerlaufsdatum as formatDate } from "@/lib/format";
 import { History, Loader2, RotateCcw, X } from "lucide-react";
 import type { PublishHistoryEntry } from "@/types/cms";
 
@@ -15,19 +16,6 @@ interface HistoryDrawerProps {
   refreshSignal: number;
 }
 
-function formatDate(iso: string): string {
-  const date = new Date(iso);
-  const day = date.toLocaleDateString("de-DE", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  });
-  const time = date.toLocaleTimeString("de-DE", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-  return `Version vom ${day}, ${time} Uhr`;
-}
 
 export function HistoryDrawer({
   siteId,

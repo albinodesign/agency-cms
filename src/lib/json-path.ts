@@ -22,12 +22,6 @@ const MAX_SEGMENTS = 20;
 const MAX_INDEX = 9999;
 const MAX_PATH_LENGTH = 500;
 
-export interface SafeParsedPath {
-  segments: Array<string | number>;
-  /** Einheitliche Schreibweise: "items[0].title" und "items.0.title" werden identisch. */
-  canonical: string;
-}
-
 /**
  * Ergebnis einer Pfadprüfung. Absichtlich ein flaches Interface statt Union,
  * damit es in jedem Kompiliermodus (auch ohne strict) ohne Eingrenzung nutzbar ist.
