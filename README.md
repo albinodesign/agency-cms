@@ -191,6 +191,17 @@ nie auf der echten Live-Seite (`window.self !== window.top`):
     // true = Klick sucht das Feld im CMS ("Finden"), false = normale Links ("Surfen")
     let selectMode = true;
 
+    // Gemerkte CMS-Herkunft aus geprüften CMS-Nachrichten (stärker als
+    // document.referrer): Nach Navigation über einen In-Preview-Link ist der
+    // Referrer die Website-Seite, der gemerkte Origin bleibt die CMS-Domain.
+    let cmsOrigin = null;
+    let bridgeBereitGemeldet = false;
+    function meldeBridgeBereit() {
+      if (bridgeBereitGemeldet || !cmsOrigin) return;
+      bridgeBereitGemeldet = true;
+      window.parent.postMessage({ type: "CMS_BRIDGE_READY", version: 2 }, cmsOrigin);
+    }
+
     // Richtung 1: CMS -> Website (Live-Vorschau beim Tippen).
     // Nur Nachrichten aus der erlaubten CMS-Herkunft annehmen – niemals
     // ohne Origin-Check (sonst könnte jede fremde Seite Texte/Bilder
@@ -198,6 +209,8 @@ nie auf der echten Live-Seite (`window.self !== window.top`):
     window.addEventListener("message", (event) => {
       if (!CMS_ORIGINS.includes(event.origin)) return;
       if (event.source !== window.parent) return;
+      cmsOrigin = event.origin;
+      meldeBridgeBereit();
       if (event.data?.type === "CMS_SELECT_MODE") {
         selectMode = event.data.enabled !== false;
         return;
@@ -220,10 +233,13 @@ nie auf der echten Live-Seite (`window.self !== window.top`):
 
     // Richtung 2: Website -> CMS (Klick auf Text meldet das Feld).
     // Es werden nur Feld-IDs (z. B. "hero.title") geschickt, keine Inhalte.
-    // Als Ziel die Herkunft der einbettenden Seite aus document.referrer
-    // ableiten – niemals "*" (sonst leaken Feld-IDs an beliebige Parents,
-    // falls die Seite fremd eingebettet wird).
+    // Als Ziel die gemerkte CMS-Herkunft aus geprüften CMS-Nachrichten
+    // verwenden (event.origin ist vom Browser garantiert) – document.referrer
+    // dient nur als Fallback für die allererste Nachricht. Niemals "*"
+    // (sonst leaken Feld-IDs an beliebige Parents, falls die Seite fremd
+    // eingebettet wird).
     function cmsTargetOrigin() {
+      if (cmsOrigin) return cmsOrigin;
       try {
         const ref = new URL(document.referrer);
         if (CMS_ORIGINS.includes(ref.origin)) return ref.origin;

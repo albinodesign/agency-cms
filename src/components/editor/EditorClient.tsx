@@ -161,6 +161,10 @@ export function EditorClient({
   const expectPreviewLoadRef = useRef<boolean>(true);
   // true, seit die Vorschau zuletzt über einen In-Preview-Link navigiert wurde
   const innerNavRef = useRef<boolean>(false);
+  // true, sobald die aktuell geladene Vorschau-Seite CMS_BRIDGE_READY (v2)
+  // gemeldet hat: Diese Bridge stellt Finden-Klicks auch nach
+  // In-Preview-Navigation zu (gemerkter CMS-Origin statt Referrer).
+  const bridgeV2Ref = useRef<boolean>(false);
   // W11: Vorschau-Nachrichten bündeln – höchstens ein Schwung pro Frame,
   // damit schnelles Tippen das Iframe nicht flutet (fühlt sich gleich an).
   const previewQueueRef = useRef<Map<string, string>>(new Map());
@@ -266,6 +270,7 @@ export function EditorClient({
       if (!force && stripTrailingSlash(previewPageRef.current) === target) return;
       previewPageRef.current = target;
       innerNavRef.current = false;
+      bridgeV2Ref.current = false;
       expectPreviewLoadRef.current = true;
       frame.src = target;
     },
@@ -279,6 +284,7 @@ export function EditorClient({
     if (!frame || !previewUrlSafe) return;
     previewPageRef.current = frame.src;
     innerNavRef.current = false;
+    bridgeV2Ref.current = false;
     expectPreviewLoadRef.current = true;
     frame.src = frame.src;
   }, [previewUrlSafe]);
@@ -904,8 +910,9 @@ export function EditorClient({
       sendSelectMode(enabled);
       // Wer nach In-Preview-Navigation zurück in den Finden-Modus schaltet,
       // steht noch auf der Website-verlinkten Seite (ohne CMS-Referrer) –
-      // ehrlich sagen, statt Klicks versanden zu lassen.
-      if (enabled && innerNavRef.current) {
+      // ehrlich sagen, statt Klicks versanden zu lassen. Brücken ab v2
+      // brauchen den Hinweis nicht (gemerkter Origin funktioniert dort).
+      if (enabled && innerNavRef.current && !bridgeV2Ref.current) {
         pushToast("error", PREVIEW_INNER_NAV_HINT);
       }
     },
@@ -914,9 +921,10 @@ export function EditorClient({
 
   /** Jedes (Neu-)Laden der Vorschau: Klick-Modus erneut melden (die Website
    * setzt beim Laden auf "Finden" zurück) und erkennen, ob die Navigation
-   * von einem Link *innerhalb* der Vorschau kam. Dann ist document.referrer
-   * die Website-Seite und die Bridge verwirft Finden-Klicks still – der
-   * Hinweis sagt, wie man zurückkommt (Seiten-Tabs, Neu laden). */
+   * von einem Link *innerhalb* der Vorschau kam. Bei Brücken ohne
+   * CMS_BRIDGE_READY ist dann document.referrer die Website-Seite und die
+   * Bridge verwirft Finden-Klicks still – der Hinweis sagt, wie man
+   * zurückkommt (Seiten-Tabs, Neu laden). */
   const handlePreviewLoad = useCallback(() => {
     sendSelectMode(selectMode);
     if (expectPreviewLoadRef.current) {
@@ -924,7 +932,7 @@ export function EditorClient({
       return;
     }
     innerNavRef.current = true;
-    if (selectMode) {
+    if (selectMode && !bridgeV2Ref.current) {
       pushToast("error", PREVIEW_INNER_NAV_HINT);
     }
   }, [sendSelectMode, selectMode, pushToast]);
@@ -940,8 +948,15 @@ export function EditorClient({
       // erwarteter Origin UND erwartetes Fenster (das eingebettete Iframe).
       if (event.origin !== previewOrigin) return;
       if (event.source !== iframeRef.current?.contentWindow) return;
-      const data = event.data as { type?: unknown; field?: unknown } | null;
-      if (!data || data.type !== "CMS_FIELD_SELECT" || typeof data.field !== "string") {
+      const data = event.data as { type?: unknown; field?: unknown; version?: unknown } | null;
+      if (!data || typeof data.type !== "string") return;
+      // Bereitschafts-Meldung der Bridge (ab v2): Finden-Klicks kommen auch
+      // nach In-Preview-Navigation an – kein Warn-Hinweis nötig.
+      if (data.type === "CMS_BRIDGE_READY") {
+        if (data.version === 2) bridgeV2Ref.current = true;
+        return;
+      }
+      if (data.type !== "CMS_FIELD_SELECT" || typeof data.field !== "string") {
         return;
       }
       // Feld-ID vor der Verarbeitung validieren (Selektor-Injection abwehren)

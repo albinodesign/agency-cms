@@ -1,6 +1,6 @@
 # CMS-REFERENCE.md — Verbindlicher Contract: Agency CMS ↔ Website
 
-- **Version:** 1.1 · **Stand:** 2026-09-26 · **CMS-Kompatibilität:** `main` ab `fix/reference-1-1` (Nachfolger von Merge-PR #1)
+- **Version:** 1.2 · **Stand:** 2026-09-26 · **CMS-Kompatibilität:** `main` ab `fix/preview-referrer` (Nachfolger von `fix/reference-1-1`)
 - **Diese Datei gewinnt:** Bei Widerspruch zwischen dieser Referenz, `AGENTS.md` und `README.md` gilt **immer diese Datei**.
 - **Adressat:** KI-Coding-Agenten und Entwickler, die eine Website **neu** CMS-kompatibel bauen. Kein Vorwissen über das CMS nötig.
 
@@ -21,7 +21,7 @@ Das Agency CMS lässt nicht-technische Kunden Texte, Bilder und Blog-Artikel ihr
 | Branch | `main` (Vercel-Produktion **muss** `main` deployen) |
 | JSON-Schreibformat (CMS-seitig) | `JSON.stringify(data, null, 2)` — die Website darf Dateien **nie** umschreiben; unbekannte Schlüssel immer stehen lassen |
 | Nachrichten CMS → Website | `CMS_FIELD_UPDATE`, `CMS_SELECT_MODE` |
-| Nachricht Website → CMS | `CMS_FIELD_SELECT` |
+| Nachrichten Website → CMS | `CMS_FIELD_SELECT`, `CMS_BRIDGE_READY` (ab Bridge v2) |
 | DOM-Marker | `data-cms-section="[sektion-id]"`, `data-cms-field="[feld-id]"` |
 | Iframe-Erkennung | nur wenn `window.self !== window.top` |
 | Banner-Objekt | `site.banner` = `{ enabled, variant, text }` |
@@ -148,16 +148,27 @@ Hinweis: `data-cms-section` dient der Struktur und ist für künftige Sprünge r
 
 ## 7. Preview-Protokoll
 
-Drei Nachrichten, zwei Richtungen. **Niemals** `postMessage(…, "*")` — immer konkrete Origins (Agentur trägt CMS-Domain + `http://localhost:3000` für lokal ein).
+Vier Nachrichten, zwei Richtungen. **Niemals** `postMessage(…, "*")` — immer konkrete Origins (Agentur trägt CMS-Domain + `http://localhost:3000` für lokal ein).
 
 ```html
 <script is:inline>
   if (window.self !== window.top) {
     const CMS_ORIGINS = ["https://cms.deine-agentur.de", "http://localhost:3000"];
     let selectMode = true; // true = „Finden", false = „Surfen"
+    // Gemerkte CMS-Herkunft aus geprüften CMS-Nachrichten (stärker als
+    // document.referrer): Nach Navigation über einen In-Preview-Link ist der
+    // Referrer die Website-Seite, der gemerkte Origin bleibt die CMS-Domain.
+    let cmsOrigin = null;
+    let bridgeBereitGemeldet = false;
+    function meldeBridgeBereit() {
+      if (bridgeBereitGemeldet || !cmsOrigin) return;
+      bridgeBereitGemeldet = true;
+      window.parent.postMessage({ type: "CMS_BRIDGE_READY", version: 2 }, cmsOrigin);
+    }
     window.addEventListener("message", (event) => {
       if (!CMS_ORIGINS.includes(event.origin)) return;   // 1. Origin
       if (event.source !== window.parent) return;        // 2. Quelle
+      cmsOrigin = event.origin; meldeBridgeBereit();
       if (event.data?.type === "CMS_SELECT_MODE") { selectMode = event.data.enabled !== false; return; }
       if (event.data?.type !== "CMS_FIELD_UPDATE") return;
       if (typeof event.data.field !== "string" || typeof event.data.value !== "string") return; // 3. Form
@@ -169,6 +180,7 @@ Drei Nachrichten, zwei Richtungen. **Niemals** `postMessage(…, "*")` — immer
       });
     });
     function cmsTargetOrigin() {
+      if (cmsOrigin) return cmsOrigin;
       try { const ref = new URL(document.referrer); if (CMS_ORIGINS.includes(ref.origin)) return ref.origin; }
       catch { /* nichts senden */ } return null;
     }
@@ -188,9 +200,9 @@ Drei Nachrichten, zwei Richtungen. **Niemals** `postMessage(…, "*")` — immer
 </script>
 ```
 
-Nachrichten: `CMS_FIELD_UPDATE { field, value }` (CMS→Seite, sofort beim Tippen), `CMS_SELECT_MODE { enabled }` (CMS→Seite, auch bei jedem Iframe-Neuladen), `CMS_FIELD_SELECT { field }` (Seite→CMS, nur Feld-ID, nie Inhalte). Unbekannte/ungültige Nachrichten werden **still ignoriert** (keine Fehler, kein Fallback).
+Nachrichten: `CMS_FIELD_UPDATE { field, value }` (CMS→Seite, sofort beim Tippen), `CMS_SELECT_MODE { enabled }` (CMS→Seite, auch bei jedem Iframe-Neuladen), `CMS_FIELD_SELECT { field }` (Seite→CMS, nur Feld-ID, nie Inhalte), `CMS_BRIDGE_READY { version: 2 }` (Seite→CMS, einmal je geladener Seite nach der ersten geprüften CMS-Nachricht — damit das CMS weiß, dass diese Bridge Klicks auch nach In-Preview-Navigation zustellt). Unbekannte/ungültige Nachrichten werden **still ignoriert** (keine Fehler, kein Fallback).
 
-**Fallen, die still bleiben (gewollt, aber wissen):** Ist `document.referrer` leer (strenge Referrer-Policy, direkter Aufruf), sendet das Script **nichts** — Finden-Klicks versanden lautlos. `CMS_ORIGINS` muss **Scheme + Host + Port exakt** enthalten (`https://cms.deine-agentur.de` ≠ `http://…`, Port `:3000` zählt mit), sonst bricht jeweils eine Richtung still. Umgekehrt deaktiviert der Editor bei ungültiger Preview-URL (kein https, Tippfehler) Vorschau **und** Empfang kommentarlos — das ist Absicht (Sicherheit), kein Bug.
+**Fallen, die still bleiben (gewollt, aber wissen):** Das Antwort-Ziel für `CMS_FIELD_SELECT` ist der **gemerkte Origin aus geprüften CMS-Nachrichten** (`event.origin`, vom Browser garantiert, gegen `CMS_ORIGINS` geprüft) — `document.referrer` dient nur noch als Fallback für die erste Nachricht. Kam noch keine CMS-Nachricht an (direkter Aufruf ohne CMS, strenge Referrer-Policy), sendet das Script **nichts** — Finden-Klicks versanden lautlos. `CMS_ORIGINS` muss **Scheme + Host + Port exakt** enthalten (`https://cms.deine-agentur.de` ≠ `http://…`, Port `:3000` zählt mit), sonst bricht jeweils eine Richtung still. Umgekehrt deaktiviert der Editor bei ungültiger Preview-URL (kein https, Tippfehler) Vorschau **und** Empfang kommentarlos — das ist Absicht (Sicherheit), kein Bug. Brücken ohne `CMS_BRIDGE_READY` (vor v1.2) verlieren Finden-Klicks nach In-Preview-Navigation weiterhin still — das CMS warnt dann per Hinweis.
 
 ## 8. Banner-System
 
@@ -232,7 +244,7 @@ Content: Pfade ≤ 20 Segmente / 500 Zeichen / Index ≤ 9999; Dateien ≤ 200 Z
 - [ ] `site.json` mit gültigem `banner`-Objekt (Abschnitt 8)
 - [ ] Jede Sektion `data-cms-section`, jedes editierbare Element `data-cms-field` (exakte IDs, Marker immer am innersten Element, nie verschachtelt)
 - [ ] Brücken-Script aus Abschnitt 7 verbatim mit echten `CMS_ORIGINS` (Scheme + Host + Port exakt), nur im Iframe aktiv
-- [ ] Kein `postMessage("*")`, `CSS.escape` verwendet, Klick nur mit gültigem Ziel-Origin (`document.referrer`-Falle beachten)
+- [ ] Kein `postMessage("*")`, `CSS.escape` verwendet, Klick nur mit gültigem Ziel-Origin (gemerkter CMS-Origin, Fallback `document.referrer`), `CMS_BRIDGE_READY` (v2) wird gesendet
 - [ ] Vorschau-URL ist `https://…` (sonst bleibt die Editor-Vorschau stumm)
 - [ ] Blog: Frontmatter-Schlüssel + Grenzen, Slugs `[a-z0-9-]` ≤ 80, `draft`-Flag beachtet
 - [ ] Branch `main` wird von Vercel als Produktion deployed; Content-Dateien werden nie umgeschrieben/gelöscht
@@ -254,5 +266,6 @@ Content: Pfade ≤ 20 Segmente / 500 Zeichen / Index ≤ 9999; Dateien ≤ 200 Z
 ## 13. Änderungshistorie
 
 - **1.0 (2026-09-26):** Ersterstellung aus CMS-`main` (Merge-PR #1 + Verlauf-Hotfix). Abgedeckt: Manifest, 9 Feldtypen, Content-Dateien, Marker, sicheres Preview-Protokoll, Banner, Bilder, Blog-Validierung, Listenmodelle.
+- **1.2 (2026-09-26):** Bridge v2 gegen die `document.referrer`-Falle: Antwort-Ziel für `CMS_FIELD_SELECT` ist der gemerkte Origin aus geprüften CMS-Nachrichten (Referrer nur Fallback), neue Nachricht `CMS_BRIDGE_READY { version: 2 }` je geladener Seite; CMS warnt nur noch bei Brücken ohne READY.
 - **1.1 (2026-09-26):** `page` funktioniert jetzt wirklich; `listenmodelle` und FAQ-Feature komplett entfernt (alle Listen fest, Einträge normal änderbar); DOM-Marker-Beispiel korrigiert; Feld-ID-/Preview-/`aspectRatio`-Hinweise ergänzt; Blog-Validierung präzisiert (`date` optional, `coverImage`-Regel, `draft` tolerant); Sicherheitshinweise zu `document.referrer` und `CMS_ORIGINS` ergänzt; Ablageort festgelegt (Root des Website-Repos).
 - TODOs: Alt-Texte für Content-Bilder (CMS-Konzept fehlt); `data-cms-section`-Auswertung (reserviert, CMS springt nur zu Feldern).
