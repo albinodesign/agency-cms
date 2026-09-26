@@ -99,7 +99,8 @@ async function main() {
     const r5 = guard.classifyFreeTarget("src/content/site.json", "banner.enabled", withBanner, "true");
     ok(r5.ok && r5.creation === null, "bestehender Banner-Pfad = normales Schreiben");
     const r6 = guard.classifyFreeTarget("src/content/pages/l.json", "items[2].frage", list, "Neu?");
-    ok(r6.ok && r6.creation && r6.creation.kind === "append", "Listen-Ergänzung am Ende (FAQ)");
+    // Referenz 1.1: keine Liste darf wachsen – Ergänzung wird abgelehnt (vorher: append-Erstellung).
+    ok(!r6.ok, "Listen-Ergänzung am Ende abgelehnt (alle Listen fest)");
     const r7 = guard.classifyFreeTarget("src/content/pages/l.json", "items[9].frage", list, "x");
     ok(!r7.ok, "Listen-Index mit Loch abgelehnt");
     const r8 = guard.classifyFreeTarget("src/content/pages/l.json", "items[2].a.b", list, "x");

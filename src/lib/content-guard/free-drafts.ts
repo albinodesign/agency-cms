@@ -15,7 +15,7 @@ export type FreeDraftParse =
 export const FREE_VALUE_MAX = 20_000;
 
 export interface FreeCreation {
-  kind: "banner" | "append";
+  kind: "banner";
   file: string;
   canonical: string;
 }
@@ -25,21 +25,14 @@ export type FreeClassify =
   | { ok: false; error: string };
 
 /**
- * Enge Erstellungsregeln für freie Entwürfe (Ausnahmen vom Bestandsgebot):
- * - Bereits vorhandene Pfade: normales Schreiben.
- * - Banner-Felder (`banner.enabled|variant|text` in site.json): dürfen den
- *   `banner`-Behälter anlegen, Werte werden typgeprüft (an/aus, Stil-Enum,
- *   Textlänge). Das CMS besitzt dieses Modell (Banner-Schalter), die Website
- *   rendert `site.banner`.
- * - Listen-Ergänzung: Anhängen exakt am Ende einer bestehenden Liste
- *   (gegen den LIVE-Stand geprüft), wahlweise als einzelner Wert oder als
- *   neues Element mit genau einem Feld
- *   (z. B. `items[3].frage` bei Länge 3 für eine neue FAQ-Frage).
- * Alles andere Neue (beliebige Schlüssel, tiefere Strukturen) wird abgelehnt.
- * Ob eine Listen-Ergänzung veröffentlichbar ist, entscheidet NICHT diese
- * Einordnung, sondern die gemeinsame Strukturprüfung (validateListStructures)
- * anhand ausdrücklicher Listenmodelle – Nachbareinträge allein begründen
- * keine Pflichtfelder (siehe DYNAMIC_LIST_MODELS).
+ * Enge Erstellungsregeln für freie Entwürfe: Bereits vorhandene Pfade sind
+ * normales Schreiben. Einzige Ausnahme vom Bestandsgebot sind Banner-Felder
+ * (`banner.enabled|variant|text` in site.json): Sie dürfen den
+ * `banner`-Behälter anlegen, Werte werden typgeprüft (an/aus, Stil-Enum,
+ * Textlänge). Das CMS besitzt dieses Modell (Banner-Schalter), die Website
+ * rendert `site.banner`.
+ * Alles andere Neue (beliebige Schlüssel, tiefere Strukturen,
+ * Listen-Ergänzungen) wird abgelehnt – alle Listen sind fest.
  * Aufrufstellen: Publish-Route (vorab + Endkontrolle) und KI-Werkzeug
  * `schreibeInhalt` (frühe Rückmeldung).
  */
@@ -70,15 +63,13 @@ export function classifyFreeTarget(
   }
 
   // Bestand zählt inklusive bereits gespeicherter Entwürfe (falls übergeben):
-  // So bleibt ein erlaubter begonnener Eintrag vervollständigbar und eine
-  // Korrektur desselben Pfads ein normales Schreiben. Die Ergänzungsprüfung
-  // darunter läuft bewusst gegen den Live-Stand (fileJson).
+  // So bleibt die Korrektur desselben Pfads ein normales Schreiben.
   const base = candidateJson ?? fileJson;
   if (base && getBySegments(base, segments) !== undefined) {
     return { ok: true, creation: null, canonical };
   }
 
-  // Ausnahme 1: Banner-Modell (Besitzer: CMS-Banner-Schalter).
+  // Ausnahme: Banner-Modell (Besitzer: CMS-Banner-Schalter).
   // Der Wert wurde oben bereits geprüft – hier nur noch die Struktur.
   if (bannerKey) {
     const existing = fileJson?.banner;
@@ -88,37 +79,9 @@ export function classifyFreeTarget(
     return { ok: true, creation: { kind: "banner", file, canonical }, canonical };
   }
 
-  // Ausnahme 2: Listen-Ergänzung exakt am Ende einer bestehenden Liste
-  // (Live-Stand in fileJson – candidateJson zählt hier nicht, damit eine
-  // Fortsetzung wie items[2].antwort nach items[2].frage erkannt wird).
-  if (fileJson) {
-    let node: unknown = fileJson;
-    for (let k = 0; k < segments.length; k += 1) {
-      const seg = segments[k];
-      if (typeof seg === "number") {
-        if (!Array.isArray(node)) break;
-        if (seg < 0 || seg > node.length) break;
-        if (seg === node.length) {
-          const rest = segments.slice(k + 1);
-          if (rest.length === 0 || (rest.length === 1 && typeof rest[0] === "string")) {
-            if (value.length > FREE_VALUE_MAX) {
-              return { ok: false, error: `Der Text ist zu lang (max. ${FREE_VALUE_MAX} Zeichen).` };
-            }
-            return { ok: true, creation: { kind: "append", file, canonical }, canonical };
-          }
-          break;
-        }
-        node = node[seg];
-        continue;
-      }
-      if (!isPlainObject(node) || !Object.prototype.hasOwnProperty.call(node, seg)) break;
-      node = node[seg];
-    }
-  }
-
   return {
     ok: false,
-    error: `Der Pfad "${path}" existiert nicht in Datei "${file}" – freie Entwürfe dürfen nur bestehende Pfade beschreiben oder ausdrücklich freigegebene Ergänzungen (Banner-Felder, Listen-Ergänzung am Ende) anlegen.`,
+    error: `Der Pfad "${path}" existiert nicht in Datei "${file}" – freie Entwürfe dürfen nur bestehende Pfade beschreiben oder Banner-Felder anlegen. Alle Listen sind fest.`,
   };
 }
 

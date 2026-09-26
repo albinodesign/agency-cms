@@ -286,6 +286,10 @@ export function normalizeManifestWithWarnings(raw: unknown): { manifest: CmsMani
           pickString(rawSection.label, rawSection.title, rawSection.sectionLabel, rawSection.id, rawSection.section) ??
           `Sektion ${index + 1}`,
         fields,
+        // page bleibt erhalten (gruppiert Editor-Tabs); ohne Angabe rät der Editor.
+        ...(typeof rawSection.page === "string" && rawSection.page.trim() !== ""
+          ? { page: rawSection.page.trim() }
+          : {}),
       });
     });
 

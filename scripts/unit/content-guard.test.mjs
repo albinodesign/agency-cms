@@ -1,4 +1,4 @@
-/** Unit-Tests: Inhaltsprüfung (Dateisperre, Banner, Payload, Listenmodelle). */
+/** Unit-Tests: Inhaltsprüfung (Dateisperre, Banner, Payload, feste Listen). */
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
@@ -50,61 +50,27 @@ test("freie Entwurfs-IDs: Format, Sperre, Pfad", () => {
   assert.equal(guard.parseFreeDraftIdSafe("falsch").ok, false);
 });
 
-test("Standardmodell: nur FAQ wächst", () => {
-  assert.notEqual(guard.findListModel("src/content/pages/faq.json", "items"), null);
-  assert.equal(guard.findListModel("src/content/pages/home.json", "testimonials.items"), null);
+test("Alle Listen sind fest: Wachstum und Kürzen werden abgelehnt", () => {
+  // (Referenz 1.1: kein dynamisches Modell mehr – auch FAQ nicht.)
+  const live = new Map([["src/content/pages/faq.json", { items: [{ frage: "F?", antwort: "A." }] }]]);
+  const gewachsen = new Map([
+    ["src/content/pages/faq.json", { items: [{ frage: "F?", antwort: "A." }, { frage: "Neu?", antwort: "Ja." }] }],
+  ]);
+  const wachstum = guard.validateListStructures(live, gewachsen, () => false);
+  assert.ok(wachstum.length > 0 && /fest/.test(wachstum.join(" ")));
+  const gekuerzt = new Map([["src/content/pages/faq.json", { items: [] }]]);
+  const schrumpf = guard.validateListStructures(live, gekuerzt, () => false);
+  assert.ok(schrumpf.length > 0 && /gekürzt/.test(schrumpf.join(" ")));
+  // Gleicher Stand bleibt ok, normale Textänderung auch
+  assert.deepEqual(guard.validateListStructures(live, live, () => false), []);
+  const geaendert = new Map([["src/content/pages/faq.json", { items: [{ frage: "F?", antwort: "Anders." }] }]]);
+  assert.deepEqual(guard.validateListStructures(live, geaendert, () => false), []);
 });
 
-test("modelleAusManifest: gültig, fehlerhaft, Standard bleibt", () => {
-  const gut = guard.modelleAusManifest({
-    sections: [],
-    listenmodelle: [
-      {
-        datei: "src/content/pages/referenzen.json",
-        pfad: "items",
-        felder: { titel: "text", sterne: "number" },
-      },
-    ],
-  });
-  assert.equal(gut.fehler.length, 0);
-  assert.equal(gut.modelle.length, 2);
-  assert.notEqual(guard.findListModel("src/content/pages/referenzen.json", "items", gut.modelle), null);
-  // Standardmodell weiter dabei
-  assert.notEqual(guard.findListModel("src/content/pages/faq.json", "items", gut.modelle), null);
-
-  const kaputt = guard.modelleAusManifest({
-    sections: [],
-    listenmodelle: [
-      { datei: "package.json", pfad: "items", felder: { t: "text" } },
-      { datei: "src/content/pages/a.json", pfad: "items[0]", felder: { t: "text" } },
-      { datei: "src/content/pages/a.json", pfad: "items", felder: { t: "emial" } },
-      { datei: "src/content/pages/a.json", pfad: "items", felder: {} },
-    ],
-  });
-  assert.equal(kaputt.fehler.length, 4);
-  assert.equal(kaputt.modelle.length, 1);
-
-  const ohne = guard.modelleAusManifest({ sections: [] });
-  assert.deepEqual(ohne.fehler, []);
-  assert.equal(ohne.modelle.length, 1);
-});
-
-test("deklariertes Modell: Wachstum vollständig ok, unvollständig blockiert", () => {
-  const { modelle } = guard.modelleAusManifest({
-    sections: [],
-    listenmodelle: [
-      { datei: "src/content/pages/referenzen.json", pfad: "items", felder: { titel: "text" } },
-    ],
-  });
-  const live = new Map([["src/content/pages/referenzen.json", { items: [{ titel: "A" }] }]]);
-  const voll = new Map([["src/content/pages/referenzen.json", { items: [{ titel: "A" }, { titel: "B" }] }]]);
-  assert.deepEqual(guard.validateListStructures(live, voll, () => false, modelle), []);
-  const leer = new Map([["src/content/pages/referenzen.json", { items: [{ titel: "A" }, { titel: "" }] }]]);
-  assert.ok(guard.validateListStructures(live, leer, () => false, modelle).length > 0);
-  // Feste Liste ohne Modell wächst weiter nicht
-  const fest = new Map([["src/content/pages/home.json", { items: ["a", "b"] }]]);
-  assert.ok(
-    guard.validateListStructures(new Map([["src/content/pages/home.json", { items: ["a"] }]]), fest, () => false, modelle)
-      .length > 0
-  );
+test("Freie Ergänzung neuer Pfade wird abgelehnt (nur Bestand + Banner)", () => {
+  const live = { items: [{ frage: "F?" }] };
+  const neu = guard.classifyFreeTarget("src/content/pages/faq.json", "items[1].frage", live, "Neu?");
+  assert.equal(neu.ok, false);
+  const bestand = guard.classifyFreeTarget("src/content/pages/faq.json", "items[0].frage", live, "Neu?");
+  assert.equal(bestand.ok, true);
 });

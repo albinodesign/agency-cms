@@ -5,8 +5,6 @@ import { requireSiteAccess } from "@/lib/auth";
 import { createOctokit, getManifestRaw, getRepoFile, normalizeManifest } from "@/lib/github";
 import { AI_MAX_STEPS, AiFieldContext, buildSystemPrompt, getAiModel, getAiModelId } from "@/lib/ai";
 import { buildAiTools } from "@/lib/ai-tools";
-import type { DynamicListModel } from "@/lib/content-guard";
-import { modelleAusManifest } from "@/lib/content-guard";
 
 /** Ordnet einen OpenRouter-Fehler auf eine deutsche Kunden-Meldung zu. */
 function mapAiError(err: unknown): { message: string; status: number } {
@@ -148,20 +146,12 @@ export async function POST(request: Request) {
     return octokit;
   }
   let serverFields: AiFieldContext[];
-  // W17: Listenmodelle aus Standard + Manifest (Chat teilt Publish-Regeln).
-  let chatModelle: DynamicListModel[] | undefined;
   try {
     const loaded = await getManifestRaw(octo(), site.repo_owner, site.repo_name);
     const serverManifest = normalizeManifest(loaded.parsed);
     serverFields = serverManifest.sections.flatMap((s) =>
       s.fields.map((f) => ({ id: f.id, label: f.label, type: f.type, file: f.file, path: f.path, maxLength: f.maxLength }))
     );
-    const modelle = modelleAusManifest(serverManifest);
-    chatModelle = modelle.modelle;
-    if (modelle.fehler.length > 0) {
-      // Nur Warnung hier (der Publish lehnt kaputte Deklarationen streng ab).
-      console.error("ai/chat: Listenmodelle im Manifest fehlerhaft:", modelle.fehler.join(" | "));
-    }
   } catch (err) {
     return NextResponse.json(
       {
@@ -202,12 +192,9 @@ export async function POST(request: Request) {
   });
 
   // Werkzeuge aus dem testbaren Modul (dieselben Regeln wie im Publish).
-  // W17: Listenmodelle aus Standard + Manifest (Chat teilt Publish-Regeln).
-  // Kaputte Deklarationen wurden oben geloggt (der Publish lehnt sie streng ab).
   const tools = buildAiTools({
     site: { id: siteId, repo_owner: site.repo_owner, repo_name: site.repo_name },
     serverFields,
-    modelle: chatModelle,
     store: {
       // W12: DB-Rohmledungen gehören ins Server-Protokoll – an KI/Kunde
       // geht nur ein verständlicher Satz (keine Tabellen-/RLS-Details).

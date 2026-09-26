@@ -147,11 +147,22 @@ async function main() {
   const validate = require(path.join(tmp, "lib", "validate.js"));
 
   // ---------- Teil U: gemeinsame Bausteine ----------
+  // (Referenz 1.1: keine dynamischen Modelle mehr – alle Listen sind fest.)
   {
-    ok(typeof guard.findListModel === "function", "U-D1 gemeinsame Listmodell-Suche existiert");
+    ok(typeof guard.fixedListGrowError === "function", "U-D1 gemeinsame Festlisten-Meldung existiert");
     ok(typeof guard.validateListStructures === "function", "U-D2 gemeinsame Listen-Strukturprüfung existiert");
     ok(typeof guard.getBannerProblems === "function", "U-D3 gemeinsame Banner-Prüfung existiert");
-    ok(typeof guard.missingAppendKeys === "function", "U-D4 gemeinsame Ergänzungs-Hinweise existieren");
+    ok(
+      guard
+        .validateListStructures(
+          new Map([["src/content/pages/faq.json", { items: [{ frage: "F?", antwort: "A." }] }]]),
+          new Map([["src/content/pages/faq.json", { items: [{ frage: "F?", antwort: "A." }, { frage: "N?", antwort: "J." }] }]]),
+          () => false
+        )
+        .join(" ")
+        .match(/fest/),
+      "U-D4 FAQ-Wachstum abgelehnt (alle Listen fest)"
+    );
     ok(typeof validate.validateFinalJsonValue === "function", "U-D5 strikte Endtyp-Prüfung existiert");
     if (typeof validate.validateFinalJsonValue === "function") {
       ok(validate.validateFinalJsonValue("number", 42) === null, "U-D6 echte Zahl ok");
@@ -162,10 +173,17 @@ async function main() {
       ok(validate.validateFinalJsonValue("text", null) !== null, "U-D11 null als Text abgelehnt");
       ok(validate.validateFinalJsonValue("number", null) !== null, "U-D12 null als Zahl abgelehnt");
     }
-    if (typeof guard.findListModel === "function") {
-      ok(guard.findListModel("src/content/pages/faq.json", "items") !== null, "U-D13 FAQ-Modell vorhanden");
-      ok(guard.findListModel("src/content/pages/home.json", "testimonials.items") === null, "U-D14 festes Bewertungsmodell: kein Wachstumsmodell");
-    }
+    // (Referenz 1.1: alle Listen fest – auch FAQ hat kein Wachstumsmodell mehr.)
+    ok(
+      guard
+        .validateListStructures(
+          new Map([["src/content/pages/home.json", { items: ["a"] }]]),
+          new Map([["src/content/pages/home.json", { items: ["a"] }]]),
+          () => false
+        )
+        .length === 0,
+      "U-D14 fester Stand bleibt ok"
+    );
     if (typeof guard.getBannerProblems === "function") {
       ok(guard.getBannerProblems({ enabled: true, variant: "vacation", text: "ok" }).length === 0, "U-D15 gültiger Banner ok");
       ok(guard.getBannerProblems({ enabled: false, variant: "party", text: "x".repeat(161) }).length >= 2, "U-D16 ausgeschalteter Banner mit party/Überlänge bemängelt");
@@ -412,16 +430,16 @@ module.exports = Object.assign({}, real, {
     ok(r.commits.length === 0 && r.draftsLeft === 4, "D-L1 kein Write, Entwürfe bleiben");
   }
   {
-    // D-L2: unvollständige FAQ-Ergänzung per Publish -> 400 nennt antwort
+    // D-L2 (Referenz 1.1): FAQ-Ergänzung per Publish -> 400 feste Liste, kein Write.
     const r = await runScenario({
       manifest: FAQ_MANIFEST,
       files: FAQ_FILES(),
       drafts: [["json:src/content/pages/faq.json:items[2].frage", "Neu?"]],
       codeDrafts: [],
     });
-    ok(r.status === 400 && /antwort/.test(r.body.error || ""), "D-L2 unvollständige FAQ-Ergänzung -> 400 nennt antwort");
+    ok(r.status === 400 && /fest/.test(r.body.error || ""), "D-L2 FAQ-Ergänzung -> 400 feste Liste");
     ok(r.commits.length === 0, "D-L2 kein Write");
-    // D-L3: vollständige FAQ-Ergänzung bei vorhandenem Modell -> 200
+    // D-L3 (Referenz 1.1): Auch vollständige FAQ-Ergänzung -> 400, Entwürfe bleiben.
     const full = await runScenario({
       manifest: FAQ_MANIFEST,
       files: FAQ_FILES(),
@@ -432,9 +450,9 @@ module.exports = Object.assign({}, real, {
       codeDrafts: [],
     });
     const items = JSON.parse(full.repo.get("src/content/pages/faq.json")).items;
-    ok(full.status === 200, "D-L3 vollständige FAQ-Ergänzung -> 200");
-    ok(items.length === 3 && items[2].frage === "Neu?" && items[2].antwort === "Neue Antwort.", "D-L3 neues Element vollständig");
-    ok(full.draftsLeft === 0, "D-L3 Entwürfe aufgeräumt");
+    ok(full.status === 400, "D-L3 vollständige FAQ-Ergänzung -> 400 feste Liste");
+    ok(items.length === 2, "D-L3 Liste unverändert");
+    ok(full.draftsLeft === 2, "D-L3 Entwürfe bleiben erhalten");
   }
 
   // ---------- Normale Bearbeitungen + Alias + spätes Feld ----------
@@ -611,23 +629,22 @@ module.exports = Object.assign({}, real, {
     ok(bad.fehler && h.stored.length === 0, "C-B3 freier Alias banner.variant=party abgelehnt");
   }
   {
-    // C-F1/F2: Frage speichern, Antwort als Fortsetzung (kein neuer-Pfad-Fehler),
-    // Korrektur des begonnenen Entwurfs, danach veröffentlichbar + Publish ok.
+    // C-F1/F2 (Referenz 1.1): FAQ-Ergänzung im Chat sofort abgelehnt –
+    // alle Listen sind fest, nichts wird gespeichert.
     const h = chatHarness({ files: FAQ_FILES(), drafts: [], serverFields: [] });
     const q = await h.tools.schreibeInhalt.execute({ datei: "src/content/pages/faq.json", pfad: "items[2].frage", wert: "Neu?" });
-    ok(!q.fehler && /antwort/i.test(q.hinweis || ""), "C-F1 Frage gespeichert mit ehrlichem Antwort-Hinweis");
+    ok(q.fehler && /fest/.test(q.fehler) && h.stored.length === 0, "C-F1 Frage abgelehnt (feste Liste), nichts gespeichert");
     const fix = await h.tools.schreibeInhalt.execute({ datei: "src/content/pages/faq.json", pfad: "items[2].frage", wert: "Neu korrigiert?" });
-    ok(!fix.fehler, "C-F1b Korrektur des begonnenen Entwurfs möglich");
+    ok(fix.fehler && h.stored.length === 0, "C-F1b Korrektur ebenfalls abgelehnt, nichts gespeichert");
     const a = await h.tools.schreibeInhalt.execute({ datei: "src/content/pages/faq.json", pfad: "items[2].antwort", wert: "Neue Antwort." });
-    ok(!a.fehler && (a.hinweis === null || a.hinweis === undefined), "C-F2 Antwort als Fortsetzung gespeichert, Eintrag vollständig");
+    ok(a.fehler && h.stored.length === 0, "C-F2 Antwort abgelehnt (feste Liste), nichts gespeichert");
     const mirror = await runScenario({
       manifest: FAQ_MANIFEST,
       files: FAQ_FILES(),
       drafts: h.stored.map((d) => [d.field_id, d.value]),
       codeDrafts: [],
     });
-    const items = mirror.status === 200 ? JSON.parse(mirror.repo.get("src/content/pages/faq.json")).items : [];
-    ok(mirror.status === 200 && items.length === 3 && items[2].antwort === "Neue Antwort.", "C-F2b Chat-Entwürfe gemeinsam veröffentlichbar");
+    ok(mirror.status === 200 || mirror.commits.length === 0, "C-F2b nichts zu veröffentlichen, kein Write");
   }
   {
     // C-T1: feste Bewertungsliste schon beim ersten Schritt ehrlich abgelehnt
@@ -716,10 +733,9 @@ module.exports = Object.assign({}, real, {
     ok(r2.status === 400 && r2.commits.length === 0 && r2.draftsLeft === 1, "E-P2 rein fehlerhaft -> 400 ohne Write, Entwurf bleibt");
   }
 
-  // ---------- Teil E: Restlücken nach 29f6da5 ----------
+  // ---------- Teil E: Restlücken nach 29f6da5 (Referenz 1.1: alle Listen fest) ----------
   {
-    // Kürzen ist erlaubt; die verbleibenden Einträge brauchen trotzdem
-    // alle Modellangaben. Keine Umgehung durch Änderung der Listenlänge.
+    // Kürzen ist nicht mehr erlaubt; unvollständige Einträge scheitern ohnehin.
     const file = "src/content/pages/faq.json";
     const files = FAQ_FILES();
     const bad = await runScenario({
@@ -728,8 +744,8 @@ module.exports = Object.assign({}, real, {
       drafts: [],
       codeDrafts: [[file, JSON.stringify({ items: [{ frage: "Q1" }] })]],
     });
-    ok(bad.status === 400 && /antwort/.test(bad.body.error || "") && bad.commits.length === 0,
-      "E-S7 gekürzte FAQ ohne Pflichtfeld -> 400 ohne Write");
+    ok(bad.status === 400 && /fest|gekürzt/.test(bad.body.error || "") && bad.commits.length === 0,
+      "E-S7 gekürzte FAQ -> 400 ohne Write");
     ok(bad.codeLeft === 1, "E-S7 vollständiger Datei-Entwurf bleibt erhalten");
     ok(bad.repo.get(file) === files[file], "E-S7 Live-Datei bleibt unverändert");
     const good = await runScenario({
@@ -738,8 +754,8 @@ module.exports = Object.assign({}, real, {
       drafts: [],
       codeDrafts: [[file, JSON.stringify({ items: [{ frage: "Q1", antwort: "A1" }] })]],
     });
-    ok(good.status === 200 && JSON.parse(good.repo.get(file)).items.length === 1,
-      "E-S8 gültige gekürzte FAQ bleibt veröffentlichbar");
+    ok(good.status === 400 && good.commits.length === 0,
+      "E-S8 auch gültiges Kürzen bleibt abgelehnt (feste Liste)");
   }
   {
     // E-S1: volle faq.json verliert bei vorhandenem Eintrag das Pflichtfeld
@@ -826,17 +842,16 @@ module.exports = Object.assign({}, real, {
     ok(r2.status === 400 && /Struktur/.test(r2.body.error || "") && r2.commits.length === 0, "E-S6 fehlender Schlüssel in fester Liste -> 400 ohne Write");
   }
   {
-    // E-C1: Frage speichern, dieselbe Frage korrigieren (ohne Antwort) ->
-    // Status aus dem zusammengesetzten Entwurf: antwort fehlt, nicht veröffentlichbar.
+    // E-C1 (Referenz 1.1): FAQ-Ergänzung im Chat sofort abgelehnt –
+    // alle Listen sind fest, nichts wird gespeichert.
     const h = chatHarness({ files: FAQ_FILES(), drafts: [], serverFields: [] });
     const q = await h.tools.schreibeInhalt.execute({ datei: "src/content/pages/faq.json", pfad: "items[2].frage", wert: "Neu?" });
-    ok(!q.fehler && q.veroeffentlichbar === false && /antwort/i.test(q.hinweis || ""), "E-C1a Frage gespeichert: antwort fehlt, nicht veröffentlichbar");
+    ok(q.fehler && /fest/.test(q.fehler) && h.stored.length === 0, "E-C1a Frage abgelehnt (feste Liste), nichts gespeichert");
     const fix = await h.tools.schreibeInhalt.execute({ datei: "src/content/pages/faq.json", pfad: "items[2].frage", wert: "Neu korrigiert?" });
-    ok(!fix.fehler && fix.veroeffentlichbar === false && /antwort/i.test(fix.hinweis || ""), "E-C1b Korrektur ohne Antwort: weiterhin antwort fehlend, nicht veröffentlichbar");
-    // E-C2: Korrektur im vollständigen Eintrag bleibt veröffentlichbar.
-    await h.tools.schreibeInhalt.execute({ datei: "src/content/pages/faq.json", pfad: "items[2].antwort", wert: "Neue Antwort." });
-    const fix2 = await h.tools.schreibeInhalt.execute({ datei: "src/content/pages/faq.json", pfad: "items[2].frage", wert: "Neu final?" });
-    ok(!fix2.fehler && fix2.veroeffentlichbar === true && (fix2.hinweis === null || fix2.hinweis === undefined), "E-C2 Korrektur im vollständigen Eintrag: veröffentlichbar");
+    ok(fix.fehler && h.stored.length === 0, "E-C1b Korrektur ebenfalls abgelehnt, nichts gespeichert");
+    // E-C2: Korrektur im bestehenden Eintrag bleibt möglich (Bestand schreiben).
+    const fix2 = await h.tools.schreibeInhalt.execute({ datei: "src/content/pages/faq.json", pfad: "items[0].frage", wert: "Q1 neu?" });
+    ok(!fix2.fehler && fix2.veroeffentlichbar === true, "E-C2 Korrektur im bestehenden Eintrag: veröffentlichbar");
   }
   {
     // E-C3: Banner-Korrektur auf bestehendem Pfad: nach Einschalten fehlt

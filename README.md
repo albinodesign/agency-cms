@@ -138,28 +138,9 @@ Der Editor rendert seine Felder aus `src/content/cms.manifest.json` im Website-R
 - `maxLength` (optional): Zeichenbegrenzung inkl. Zähler im Editor (Überlänge wird live rot markiert, Publish hält die Datei zurück)
 - `placeholder` (optional): Beispieltext im leeren Feld
 
-**Dynamische Listen** (optional, `listenmodelle` auf oberster Manifest-Ebene):
-Nur ausdrücklich modellierte Listen dürfen per Entwurf am Ende wachsen –
-alle anderen Listen sind fest. Beispiel (Referenzen-Seite mit Titel + Sternen):
-
-```json
-{
-  "sections": [ ... ],
-  "listenmodelle": [
-    {
-      "datei": "src/content/pages/referenzen.json",
-      "pfad": "items",
-      "felder": { "titel": "text", "text": "text", "sterne": "number" }
-    }
-  ]
-}
-```
-
-Regeln: `datei` wie bei Feldern (nur `site.json`/`pages/*.json`), `pfad` als
-Punkt-Pfad ohne Index, 1–20 Felder mit gültigen Typen. Neue Elemente brauchen
-alle Felder typgerecht und keine fremden Schlüssel. Fehlerhafte Modelle lehnt
-das Veröffentlichen als Ganzes ab (Entwürfe bleiben). Eingebaut ist immer das
-FAQ-Modell (`faq.json`, `items` mit `frage` + `antwort`).
+**Listen sind fest:** Keine Liste darf per Entwurf wachsen oder schrumpfen.
+Bestehende Listeneinträge (z. B. FAQ-Fragen) bleiben wie normale Text-Felder
+änderbar – neue Einträge legt die Agentur direkt im Website-Repo an.
 
 ## Blog-Engine
 
