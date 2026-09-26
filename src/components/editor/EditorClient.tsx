@@ -45,6 +45,8 @@ interface EditorClientProps {
   site: Site;
   manifest: CmsManifest | null;
   manifestError: string | null;
+  /** W16: Stille Manifest-Deutungen (steht sonst nirgends) */
+  manifestWarnings?: string[];
   contentWarning: string | null;
   /** Live-Werte aus GitHub, bereits mit Drafts gemergt */
   initialValues: DraftMap;
@@ -124,6 +126,7 @@ export function EditorClient({
   site,
   manifest,
   manifestError,
+  manifestWarnings = [],
   contentWarning,
   initialValues,
   liveValues: initialLiveValues,
@@ -134,6 +137,10 @@ export function EditorClient({
   const pendingRef = useRef(0);
   // Noch ungespeicherte Tipp-Stände je Feld (für garantierten Flush vor Publish)
   const pendingValuesRef = useRef<Map<string, string>>(new Map());
+  // W11: Vorschau-Nachrichten bündeln – höchstens ein Schwung pro Frame,
+  // damit schnelles Tippen das Iframe nicht flutet (fühlt sich gleich an).
+  const previewQueueRef = useRef<Map<string, string>>(new Map());
+  const previewRafRef = useRef<number | null>(null);
 
   // Vorschau-Adresse hart geprüft: Nur http(s) – bei ungültiger Adresse ist
   // die Vorschau deaktiviert (statt Nachrichten von allen Origins anzunehmen).
@@ -188,6 +195,27 @@ export function EditorClient({
   const selectFlashRef = useRef<number | null>(null);
   // Echte Aufbau-Abfrage nach dem Veröffentlichen (wird beim Verlassen gestoppt)
   const deployPollRef = useRef<number | null>(null);
+  // W11: Vorschau-Update einreihen (ein Schwung pro Animationsframe)
+  const queuePreviewUpdate = useCallback(
+    (fieldId: string, value: string) => {
+      if (!previewOrigin) return;
+      previewQueueRef.current.set(fieldId, value);
+      if (previewRafRef.current !== null) return;
+      previewRafRef.current = window.requestAnimationFrame(() => {
+        previewRafRef.current = null;
+        const frame = iframeRef.current?.contentWindow;
+        if (!frame) {
+          previewQueueRef.current.clear();
+          return;
+        }
+        for (const [fid, val] of previewQueueRef.current) {
+          frame.postMessage({ type: "CMS_FIELD_UPDATE", field: fid, value: val }, previewOrigin);
+        }
+        previewQueueRef.current.clear();
+      });
+    },
+    [previewOrigin]
+  );
   // W8: Parallele Tabs – neuester bekannter Entwurfs-Stempel + Warnung bei Fremdänderung
   const draftsBaselineRef = useRef<string | null>(null);
   const [externalChange, setExternalChange] = useState(false);
@@ -381,6 +409,7 @@ export function EditorClient({
     const timers = timersRef.current;
     return () => {
       timers.forEach((t) => clearTimeout(t));
+      if (previewRafRef.current !== null) window.cancelAnimationFrame(previewRafRef.current);
       if (selectFlashRef.current) window.clearTimeout(selectFlashRef.current);
       if (deployPollRef.current) window.clearInterval(deployPollRef.current);
     };
@@ -434,15 +463,8 @@ export function EditorClient({
       // Noch ungespeicherten Stand merken (für garantierten Flush vor Publish)
       pendingValuesRef.current.set(fieldId, value);
 
-      // a) Sofortiges Live-Update an die Vorschau (nur an den konkreten Origin).
-      // Gedrosselt: höchstens ein Update pro Feld und Animationsframe, damit
-      // schnelles Tippen bei vielen Feldern das Iframe nicht flutet.
-      if (previewOrigin) {
-        iframeRef.current?.contentWindow?.postMessage(
-          { type: "CMS_FIELD_UPDATE", field: fieldId, value },
-          previewOrigin
-        );
-      }
+      // a) Sofortiges Live-Update an die Vorschau (gebündelt pro Frame, W11)
+      queuePreviewUpdate(fieldId, value);
 
       // b) Debounced Autosave (800ms)
       const existing = timersRef.current.get(fieldId);
@@ -457,7 +479,7 @@ export function EditorClient({
         }, 800)
       );
     },
-    [saveDraft, previewOrigin]
+    [saveDraft, queuePreviewUpdate]
   );
 
   // Schreibt alle noch wartenden Tipp-Stände sofort (statt erst nach 800 ms).
@@ -738,12 +760,7 @@ export function EditorClient({
         return next;
       });
       // Vorschau springt sofort auf den Live-Stand zurück
-      if (previewOrigin) {
-        iframeRef.current?.contentWindow?.postMessage(
-          { type: "CMS_FIELD_UPDATE", field: fieldId, value: liveValue },
-          previewOrigin
-        );
-      }
+      queuePreviewUpdate(fieldId, liveValue);
       try {
         const supabase = createClient();
         await supabase.from("drafts").delete().eq("site_id", site.id).eq("field_id", fieldId);
@@ -751,7 +768,7 @@ export function EditorClient({
         pushToast("error", "Entwurf konnte nicht aus der Datenbank gelöscht werden – bitte Seite neu laden.");
       }
     },
-    [liveMap, previewOrigin, site.id, pushToast]
+    [liveMap, queuePreviewUpdate, site.id, pushToast]
   );
 
   /** Öffnet den Diff-Inspektor und lädt zusätzlich offene Datei-Entwürfe. */
@@ -759,15 +776,21 @@ export function EditorClient({
     setDiffOpen(true);
     try {
       const supabase = createClient();
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("code_drafts")
         .select("file_path")
         .eq("site_id", site.id);
+      if (error) {
+        pushToast("error", "Datei-Entwürfe konnten nicht geladen werden – die Liste ist ggf. unvollständig.");
+        setCodeDraftFiles([]);
+        return;
+      }
       setCodeDraftFiles(((data ?? []) as Array<{ file_path: string }>).map((r) => r.file_path));
     } catch {
+      pushToast("error", "Datei-Entwürfe konnten nicht geladen werden – die Liste ist ggf. unvollständig.");
       setCodeDraftFiles([]);
     }
-  }, [site.id]);
+  }, [site.id, pushToast]);
 
   // KI-Entwürfe wurden serverseitig bereits in drafts geupsertet.
   // Hier nur lokalen State & Live-Iframe aktualisieren (kein erneuter DB-Timer!).
@@ -777,14 +800,9 @@ export function EditorClient({
       setDirtyFields((prev) => new Set(prev).add(fieldId));
       setStatus("saved");
 
-      if (previewOrigin) {
-        iframeRef.current?.contentWindow?.postMessage(
-          { type: "CMS_FIELD_UPDATE", field: fieldId, value },
-          previewOrigin
-        );
-      }
+      queuePreviewUpdate(fieldId, value);
     },
-    [previewOrigin]
+    [queuePreviewUpdate]
   );
 
   /** Meldet der Vorschau ob Klicks Felder suchen (Finden) oder normal funktionieren (Surfen). */
@@ -1170,6 +1188,29 @@ export function EditorClient({
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                   <p className="break-words">{contentWarning}</p>
+                </div>
+              </div>
+            )}
+
+            {/* W16: Stille Manifest-Deutungen – Tippfehler der Website fallen auf */}
+            {!manifestError && manifestWarnings.length > 0 && (
+              <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <div className="min-w-0">
+                    <p className="font-semibold">
+                      Feldliste mit {manifestWarnings.length} Hinweis{manifestWarnings.length === 1 ? "" : "en"} geladen
+                    </p>
+                    <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                      {manifestWarnings.slice(0, 5).map((h, i) => (
+                        <li key={i} className="break-words">{h}</li>
+                      ))}
+                      {manifestWarnings.length > 5 && (
+                        <li>+ {manifestWarnings.length - 5} weitere … (Details stehen im Website-Repo in src/content/cms.manifest.json)</li>
+                      )}
+                    </ul>
+                    <p className="mt-1">Bitte die Agentur bitten, die Feldliste zu prüfen – es wurde nichts gelöscht, nur gedeutet.</p>
+                  </div>
                 </div>
               </div>
             )}

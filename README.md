@@ -19,6 +19,8 @@ Internes Kunden-CMS einer Webdesign-Agentur. Kunden können Texte und Bilder ihr
    NEXT_PUBLIC_SUPABASE_ANON_KEY=...
    SUPABASE_SERVICE_ROLE_KEY=...  # nur serverseitig, niemals committen/exponieren (Admin-Panel)
    GITHUB_TOKEN=...               # Fine-grained PAT mit Contents: Read & Write auf die Kunden-Repos
+   OPENROUTER_API_KEY=...         # nur für den KI-Chat (https://openrouter.ai/keys)
+   AI_MODEL=...                   # exakte Modell-ID aus OpenRouter, z. B. meta/muse-spark-1.3-contributor
    ```
 
 3. Dev-Server starten:
@@ -60,13 +62,26 @@ create table publish_history (
   published_by uuid references auth.users(id),
   commit_sha text,
   payload jsonb not null,   -- { "src/content/pages/home.json": { ...vollständiger Datei-Inhalt... } }
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  note text,                -- z. B. "Rollback" (Spalte ggf. nachrüsten)
+  files text[] not null default '{}'  -- Dateiliste für schlankes Laden (Nachrüst-Skript beachten)
 );
 
 create table admins (
   user_id uuid primary key references auth.users(id) on delete cascade
 );
+
+-- Erweitert um: sites.ai_enabled (KI-Chat-Schalter), code_drafts,
+-- ai_conversations/ai_messages/ai_usage (siehe supabase/ai-chat-schema.sql).
+-- Hinweis: sites.domain existiert je nach Stand ggf. nicht (optional).
 ```
+
+Ausführ-Reihenfolge im Supabase SQL-Editor:
+
+1. Tabellen oben anlegen (falls noch nicht vorhanden).
+2. `supabase/ai-chat-schema.sql` (KI-Tabellen + deren Policies).
+3. `supabase/cms-rls-schema.sql` (Mandanten-Trennung + Storage-Regeln – Pflicht für mehrere Kunden).
+4. `supabase/cms-history-files-migration.sql` (files-Spalte für schnellen Verlauf inkl. Nachpflege).
 
 Row Level Security ist Pflicht. Die vollständigen Policies liegen versioniert im
 Repository (`supabase/cms-rls-schema.sql`, ergänzt `supabase/ai-chat-schema.sql`)
@@ -117,10 +132,11 @@ Der Editor rendert seine Felder aus `src/content/cms.manifest.json` im Website-R
 }
 ```
 
-- `type`: `"text"` → einzeiliges Input, `"textarea"` → mehrzeilig, `"image"` → Bild-URL-Input mit Vorschau
-- `file`: Zieldatei im Repo (wird beim Veröffentlichen per GitHub API aktualisiert)
+- `type`: `"text"` → einzeilig, `"textarea"` → mehrzeilig, `"image"` → Bild-Upload mit Vorschau, `"number"` → Zahl, `"email"`, `"phone"`, `"url"`, `"date"` (JJJJ-MM-TT), `"boolean"` → An/Aus-Schalter. Unbekannte Typen werden als `"text"` gedeutet und im Editor als Hinweis angezeigt.
+- `file`: Zieldatei im Repo (wird beim Veröffentlichen per GitHub API aktualisiert; erlaubt: `src/content/site.json` und JSON-Dateien unter `src/content/pages/`)
 - `path`: Dot-Path innerhalb der JSON-Datei
-- `maxLength` (optional): Zeichenbegrenzung inkl. Zähler im Editor
+- `maxLength` (optional): Zeichenbegrenzung inkl. Zähler im Editor (Überlänge wird live rot markiert, Publish hält die Datei zurück)
+- `placeholder` (optional): Beispieltext im leeren Feld
 
 ## Blog-Engine
 
@@ -133,7 +149,7 @@ Wenn das Manifest das Blog-Feature aktiviert, erscheint im Editor ein zweiter Ta
 }
 ```
 
-Artikel werden als Markdown-Dateien mit Frontmatter in `src/content/blog/` des Website-Repos verwaltet (API: `GET`/`POST`/`DELETE /api/blog`, Commits: `cms: save blog post [slug]` / `cms: delete blog post [slug]`). Das Frontmatter enthält `title`, `slug`, `date`, `coverImage`, `excerpt` und `draft`.
+Artikel werden als Markdown-Dateien mit Frontmatter in `src/content/blog/` des Website-Repos verwaltet (API: `GET`/`POST`/`DELETE /api/blog`, Commits: `cms: save blog post [slug]` / `cms: delete blog post [slug]`). Das Frontmatter enthält `title`, `slug`, `date`, `coverImage`, `coverImageAlt` (fällt auf den Titel zurück), `excerpt` und `draft`. Grenzen: Titel max. 200, Excerpt max. 500, Alt-Text max. 200, Inhalt max. 100.000 Zeichen; Cover nur http(s) oder interner `/`-Pfad. Bei Versionskonflikt wird einmal mit frischem Stand neu versucht.
 
 ## KI-Chat (OpenRouter)
 
@@ -254,4 +270,4 @@ ist der Empfang deaktiviert). `postMessage("*")` wird nirgends verwendet.
 
 ## Publish-Flow
 
-`POST /api/publish` (sessiongeschützt) liest alle Entwürfe einer Site, gruppiert sie nach Zieldatei, aktualisiert die JSON-Dateien über die GitHub Contents API und committet mit `cms: update content by client` auf `main`. Danach wird ein Snapshot in `publish_history` gespeichert und die publizierten Entwürfe aus `drafts` gelöscht. Vercel deployed den Push automatisch.
+`POST /api/publish` (session- und zugriffsgeschützt) liest alle Entwürfe einer Site, baut den Kandidaten (Live + Voll-Datei-Entwürfe + Feldänderungen) und prüft ihn **je angefasster Datei** (Teilveröffentlichung statt Alles-oder-nichts): Jede saubere Datei wird einzeln auf `main` committet (`cms: update content by client`, bei Versionskonflikt einmal mit frischem Stand neu versucht), blockierte Dateien bleiben als Entwurf erhalten und werden je Datei mit Grund in `blocked` genannt (fehlgeschlagene Commits in `failed`, `partial: true` bei Teil-Erfolg). Die Antwort nennt `publishedFieldIds`, damit der Editor genau diese Felder als live markiert. Danach Snapshot in `publish_history` (nur Veröffentlichtes, plus Dateiliste) und Löschen nur committeter Entwürfe. Rein fehlerhafte Sätze: 400 ohne Writes. Vercel deployed den Push automatisch; der Editor zeigt danach den echten Aufbau-Status (GitHub-Check, alle 10 s, max. 3 Min.).

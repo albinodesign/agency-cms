@@ -196,20 +196,34 @@ export async function POST(request: Request) {
     site: { id: siteId, repo_owner: site.repo_owner, repo_name: site.repo_name },
     serverFields,
     store: {
+      // W12: DB-Rohmledungen gehören ins Server-Protokoll – an KI/Kunde
+      // geht nur ein verständlicher Satz (keine Tabellen-/RLS-Details).
       storeDraft: async (sid, fieldId, value) => {
         const { error } = await supabase
           .from("drafts")
           .upsert({ site_id: sid, field_id: fieldId, value }, { onConflict: "site_id,field_id" });
-        return { error: error ? { message: error.message } : null };
+        if (error) {
+          console.error("ai/chat: storeDraft fehlgeschlagen:", error.message);
+          return { error: { message: "Speichern fehlgeschlagen (Details im Server-Protokoll)." } };
+        }
+        return { error: null };
       },
       storeCodeDraft: async (sid, filePath, content) => {
         const { error } = await supabase
           .from("code_drafts")
           .upsert({ site_id: sid, file_path: filePath, content }, { onConflict: "site_id,file_path" });
-        return { error: error ? { message: error.message } : null };
+        if (error) {
+          console.error("ai/chat: storeCodeDraft fehlgeschlagen:", error.message);
+          return { error: { message: "Speichern fehlgeschlagen (Details im Server-Protokoll)." } };
+        }
+        return { error: null };
       },
       listDrafts: async (sid) => {
-        const { data } = await supabase.from("drafts").select("field_id,value").eq("site_id", sid);
+        const { data, error } = await supabase.from("drafts").select("field_id,value").eq("site_id", sid);
+        if (error) {
+          console.error("ai/chat: listDrafts fehlgeschlagen:", error.message);
+          return [];
+        }
         return (data ?? []) as Array<{ field_id: string; value: string }>;
       },
       listImages: async (sid) => {

@@ -108,8 +108,9 @@ export async function POST(request: Request) {
         createError.message.toLowerCase().includes("exist");
 
       if (!alreadyExists) {
+        console.error("create-site: Kunden-Nutzer anlegen fehlgeschlagen:", createError.message);
         return NextResponse.json(
-          { error: `Kunden-Nutzer konnte nicht angelegt werden: ${createError.message}` },
+          { error: "Kunden-Nutzer konnte nicht angelegt werden. Details stehen im Server-Protokoll." },
           { status: 500 }
         );
       }
@@ -119,8 +120,9 @@ export async function POST(request: Request) {
         await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
 
       if (listError) {
+        console.error("create-site: Nutzer suchen fehlgeschlagen:", listError.message);
         return NextResponse.json(
-          { error: `Bestehender Nutzer konnte nicht gesucht werden: ${listError.message}` },
+          { error: "Bestehender Nutzer konnte nicht gesucht werden. Details stehen im Server-Protokoll." },
           { status: 500 }
         );
       }
@@ -152,8 +154,9 @@ export async function POST(request: Request) {
       .single();
 
     if (siteError || !site) {
+      console.error("create-site: Website anlegen fehlgeschlagen:", siteError?.message);
       return NextResponse.json(
-        { error: `Website konnte nicht angelegt werden: ${siteError?.message ?? "Unbekannter Fehler"}` },
+        { error: "Website konnte nicht angelegt werden. Details stehen im Server-Protokoll." },
         { status: 500 }
       );
     }
@@ -168,9 +171,10 @@ export async function POST(request: Request) {
     );
 
     if (linkError) {
+      console.error("create-site: Zuordnung fehlgeschlagen:", linkError.message);
       return NextResponse.json(
         {
-          error: `Website wurde angelegt, aber die Zuordnung ist fehlgeschlagen: ${linkError.message}`,
+          error: "Website wurde angelegt, aber die Zuordnung ist fehlgeschlagen. Details stehen im Server-Protokoll.",
         },
         { status: 500 }
       );

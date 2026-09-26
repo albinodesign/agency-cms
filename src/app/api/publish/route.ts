@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireSiteAccess } from "@/lib/auth";
+import { insertPublishHistory } from "@/lib/history";
 import {
   commitFileWithRetry,
   createOctokit,
@@ -188,8 +189,9 @@ export async function POST(request: Request) {
       .eq("site_id", siteId);
 
     if (draftsError) {
+      console.error("Publish: drafts laden fehlgeschlagen:", draftsError.message);
       return NextResponse.json(
-        { error: `Entwürfe konnten nicht geladen werden: ${draftsError.message}` },
+        { error: "Entwürfe konnten nicht geladen werden. Details stehen im Server-Protokoll." },
         { status: 500 }
       );
     }
@@ -202,8 +204,9 @@ export async function POST(request: Request) {
       .select("*")
       .eq("site_id", siteId);
     if (codeRowsError) {
+      console.error("Publish: code_drafts laden fehlgeschlagen:", codeRowsError.message);
       return NextResponse.json(
-        { error: `Code-Entwürfe konnten nicht geladen werden: ${codeRowsError.message}` },
+        { error: "Code-Entwürfe konnten nicht geladen werden. Details stehen im Server-Protokoll." },
         { status: 500 }
       );
     }
@@ -731,19 +734,24 @@ export async function POST(request: Request) {
     });
     const { committedFiles, committedFields, committedDraftIds, publishedFieldIds, commitFailed, lastCommitSha } = commit;
 
-    // Snapshot in publish_history speichern (vollständiger Stand pro Datei)
-    const { error: historyError } = await supabase.from("publish_history").insert({
-      site_id: siteId,
-      published_by: user.id ?? null,
-      commit_sha: lastCommitSha,
-      payload,
-    });
+    // Snapshot in publish_history speichern (vollständiger Stand pro Datei,
+    // plus Dateiliste für schlankes Laden – mit Fallbacks, src/lib/history.ts)
+    const { error: historyError } = await insertPublishHistory(
+      supabase,
+      {
+        site_id: siteId,
+        published_by: user.id ?? null,
+        commit_sha: lastCommitSha,
+        payload,
+      },
+      committedFiles
+    );
 
     if (historyError) {
-      console.error("publish_history insert fehlgeschlagen:", historyError);
+      console.error("publish_history insert endgültig fehlgeschlagen.");
       return NextResponse.json(
         {
-          error: `Die Änderungen wurden zu GitHub übertragen, aber der Verlaufseintrag konnte nicht gespeichert werden: ${historyError.message}`,
+          error: "Die Änderungen wurden zu GitHub übertragen, aber der Verlaufseintrag konnte nicht gespeichert werden. Details stehen im Server-Protokoll.",
         },
         { status: 500 }
       );
@@ -784,24 +792,29 @@ export async function POST(request: Request) {
     const publishedAliases = fulfilledAliases.filter((a) => committedFiles.includes(a.file));
     if (publishedAliases.length > 0) {
       const aliasIds = publishedAliases.map((a) => a.id);
-      const { data: aliasRows } = await supabase
+      // W12: Lesefehler hier nicht verschweigen – Aufräumen auslassen, Publish gilt trotzdem.
+      const { data: aliasRows, error: aliasReadError } = await supabase
         .from("drafts")
         .select("id,value")
         .eq("site_id", siteId)
         .in("id", aliasIds);
-      const stillSame = ((aliasRows ?? []) as Array<{ id: string; value: string }>)
-        .filter((row) => publishedAliases.some((a) => a.id === row.id && a.value === row.value))
-        .map((row) => row.id);
-      if (stillSame.length > 0) {
-        const { error: aliasDeleteError } = await supabase
-          .from("drafts")
-          .delete()
-          .eq("site_id", siteId)
-          .in("id", stillSame);
-        if (aliasDeleteError) {
-          console.error("alias drafts delete fehlgeschlagen:", aliasDeleteError.message);
-        } else {
-          cleanedAliases = stillSame.length;
+      if (aliasReadError) {
+        console.error("alias drafts lesen fehlgeschlagen:", aliasReadError.message);
+      } else {
+        const stillSame = ((aliasRows ?? []) as Array<{ id: string; value: string }>)
+          .filter((row) => publishedAliases.some((a) => a.id === row.id && a.value === row.value))
+          .map((row) => row.id);
+        if (stillSame.length > 0) {
+          const { error: aliasDeleteError } = await supabase
+            .from("drafts")
+            .delete()
+            .eq("site_id", siteId)
+            .in("id", stillSame);
+          if (aliasDeleteError) {
+            console.error("alias drafts delete fehlgeschlagen:", aliasDeleteError.message);
+          } else {
+            cleanedAliases = stillSame.length;
+          }
         }
       }
     }

@@ -232,7 +232,12 @@ export function ChatDrawer({
           .from("cms-media")
           .upload(path, file, { cacheControl: "3600", upsert: false });
         if (uploadError) {
-          onError(`Hochladen fehlgeschlagen (${file.name}): ${uploadError.message}`);
+          // W12: Technische Speicher-Meldungen nicht 1:1 zeigen.
+          const roh = uploadError.message ?? "";
+          const freundlich = /row.?level|policy|policies|permission|berechtigung|jwt|token|bucket/i.test(roh)
+            ? "Keine Berechtigung für diesen Ordner oder Speicher nicht eingerichtet. Bitte die Agentur fragen."
+            : roh;
+          onError(`Hochladen fehlgeschlagen (${file.name}): ${freundlich}`);
           continue;
         }
         const {

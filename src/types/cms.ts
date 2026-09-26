@@ -81,11 +81,13 @@ export interface PublishHistoryEntry {
   site_id: string;
   published_by: string | null;
   commit_sha: string | null;
-  /** Vollständige Datei-Inhalte, verschachtelt nach Dateipfad: { "src/content/pages/home.json": { ... } } */
-  payload: Record<string, Record<string, unknown>>;
+  /** Vollständige Datei-Inhalte, verschachtelt nach Dateipfad (nur bei Bedarf geladen, kann fehlen) */
+  payload?: Record<string, Record<string, unknown>>;
   created_at: string;
   /** Optionale Notiz, z. B. "Rollback" oder "ai-chat" (Spalte kann fehlen) */
   note?: string | null;
+  /** Dateiliste des Eintrags für metadaten-schlankes Laden (Spalte kann fehlen/legacy null sein) */
+  files?: string[] | null;
 }
 
 export type DraftMap = Record<string, string>;

@@ -41,8 +41,9 @@ export async function POST(request: Request) {
       .eq("id", body.siteId);
 
     if (deleteError) {
+      console.error("delete-site fehlgeschlagen:", deleteError.message);
       return NextResponse.json(
-        { error: `Website konnte nicht gelöscht werden: ${deleteError.message}` },
+        { error: "Website konnte nicht gelöscht werden. Details stehen im Server-Protokoll." },
         { status: 500 }
       );
     }

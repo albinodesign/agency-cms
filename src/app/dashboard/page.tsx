@@ -55,7 +55,10 @@ export default async function DashboardPage() {
         };
       });
     }
-  } catch {
+  } catch (err) {
+    // W12: Fehler nicht still verschlucken – im Server-Protokoll festhalten
+    // (Admin-Bereich bleibt dabei einfach ausgeblendet statt abzustürzen).
+    console.error("Dashboard: Admin-/Verbrauchsdaten konnten nicht geladen werden:", err);
     isAdmin = false;
   }
 

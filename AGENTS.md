@@ -29,6 +29,7 @@ In `.env.local` (Vorlage: `.env.local.example`, die erforderlichen Werte stehen 
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY` – öffentlicher Anon-Key
 - `SUPABASE_SERVICE_ROLE_KEY` – **nur serverseitig**, umgeht RLS komplett (Admin-Client in `src/lib/supabase/admin.ts`, nur in `src/app/api/admin/` verwenden)
 - `GITHUB_TOKEN` – Fine-grained PAT mit `Contents: Read & Write` auf die Kunden-Repos
+- `OPENROUTER_API_KEY` – nur für den KI-Chat (Modellwechsel = nur `AI_MODEL` ändern, exakte ID aus OpenRouter)
 
 ## Architektur
 
@@ -43,7 +44,7 @@ In `.env.local` (Vorlage: `.env.local.example`, die erforderlichen Werte stehen 
 
 Der Editor rendert seine Felder aus `src/content/cms.manifest.json` im jeweiligen Website-Repo. Felder haben `id`, `label`, `type` (`text` | `textarea` | `image` | `number` | `email` | `phone` | `url` | `date` | `boolean`), `file` (nur `src/content/site.json` oder `src/content/pages/*.json` als normales Inhaltsziel) und `path` (sicherer Pfad, inkl. Listen-Schreibweisen `items[0].x`/`items.0.x`), optional `placeholder` und `maxLength`. `features.blog: true` (oder `{ blog: { enabled: true } }`) aktiviert den Blog-Tab. `normalizeManifest` in `src/lib/github.ts` akzeptiert toleranterweise mehrere Formate (Array von Sektionen/Feldern, `{ sections }`, `{ fields }`); Sektionen ohne gültige Felder fallen weg. Toleranzen im Detail: Sektions-ID `id || section || section-N`, Sektions-Titel `label || title || sectionLabel || id || section || Sektion N`, Feld-Label `label || title || id`; Felder mit unbekanntem `type` werden als `text` übernommen statt verworfen, Pflichtangaben ohne `id`/`file`/`path` werden herausgefiltert.
 
-Im Editor gruppiert `detectPageLabel` (`src/components/editor/EditorClient.tsx`) die Sektionen per Schlüsselwort-Heuristik (ID/Titel, sonst Dateiname im `file`-Pfad) zu Seiten-Tabs (z. B. Startseite, Leistungen, Kontakt, Firmendaten); innerhalb einer Seite bleiben die Sektionen Akkordeons, die Suche durchsucht seitenübergreifend alle Felder. Nach dem Veröffentlichen zeigt der Editor 45 s lang eine blaue Deployment-Box mit Fortschrittsbalken und lädt danach die Vorschau automatisch neu.
+Im Editor gruppiert `detectPageLabel` (`src/components/editor/EditorClient.tsx`) die Sektionen per Schlüsselwort-Heuristik (ID/Titel, sonst Dateiname im `file`-Pfad) zu Seiten-Tabs (z. B. Startseite, Leistungen, Kontakt, Firmendaten); innerhalb einer Seite bleiben die Sektionen Akkordeons, die Suche durchsucht seitenübergreifend alle Felder. Nach dem Veröffentlichen zeigt der Editor den echten Aufbau-Status (Poll alle 10 s, max. 18× = 3 Min. via `GET /api/site/[siteId]/deploy-status?sha=`) und lädt danach die Vorschau automatisch neu. Stille Manifest-Deutungen (unbekannte Typen → Text, weggelassene Einträge, Fallback-Kennungen) zeigt der Editor als bernsteinfarbene Warnbox mit Anzahl und Stelle (`normalizeManifestWithWarnings` in `src/lib/github.ts`).
 
 ### Blog-Engine
 
@@ -61,37 +62,44 @@ src/
 │   ├── editor/[siteId]/     # Editor (Server Component lädt Daten, Client rendert; loading.tsx)
 │   ├── globals.css          # Tailwind-Styles
 │   └── api/
-│       ├── publish/         # Entwürfe -> GitHub-Commits + publish_history
-│       ├── rollback/        # Wiederherstellung aus publish_history
-│       ├── blog/            # Blog-Artikel CRUD (Markdown im Repo)
-│       ├── admin/create-site/  # Site + Kunden-Nutzer anlegen (nur Admins, Service Role)
+│       ├── publish/         # Entwürfe -> GitHub-Commits + publish_history (je Datei, mit Retry + partial)
+│       ├── rollback/        # Wiederherstellung aus publish_history (je Datei geprüft, selektives Aufräumen)
+│       ├── blog/            # Blog-Artikel CRUD (Markdown im Repo, zod-validiert, mit Retry)
+│       ├── ai/chat/         # KI-Chat (Server-Feldliste, Gespräche an Ersteller gebunden)
+│       ├── ai/history/      # Letztes eigenes Gespräch + Nachrichten (mit Fehlerprüfung)
+│       ├── site/[siteId]/deploy-status/  # Echter Vercel-Aufbau-Status pro Commit-SHA
+│       ├── site/[siteId]/download-backup/  # Repo als .zip (Dateiname saniert)
+│       ├── admin/create-site/  # Site + Kunden-Nutzer anlegen (nur Admins, Service Role, Formatprüfung)
 │       ├── admin/delete-site/  # Site + CMS-Daten löschen (nur Admins, Rest per Cascade; Repo/Login bleiben)
 │       └── admin/toggle-ai/    # KI-Chat pro Site an/aus (nur Admins)
 ├── components/
-│   ├── editor/              # EditorClient, StatusBadge, UndoButton, BannerCard, FieldEditor, ImageField, HistoryDrawer, BlogPanel, BlogEditorModal
+│   ├── editor/              # EditorClient, StatusBadge, UndoButton, BannerCard, FieldEditor, ImageField, HistoryDrawer (Metadaten), BlogPanel (Paginiert), BlogEditorModal, ChatDrawer
 │   ├── DashboardClient.tsx, CreateSiteModal.tsx, LogoutButton.tsx
 ├── lib/
 │   ├── auth.ts              # Zentrale Zugriffsprüfung (requireSiteAccess, requireAdmin) für alle API-Routen
-│   ├── github.ts            # Octokit-Factory, Manifest laden/normalisieren, Repo-Dateien lesen (Base64 → UTF-8), commitFileWithRetry (ein SHA-Retry)
+│   ├── history.ts           # Verlauf-Snapshot mit files-Spalte + Fallbacks für alte Tabellen
+│   ├── github.ts            # Octokit-Factory, Manifest laden/normalisieren (+WithWarnings), Repo-Dateien lesen (Base64 → UTF-8), commitFileWithRetry (ein SHA-Retry), githubFehlerGrund (kundentauglich)
 │   ├── json-path.ts         # getByPath/setByPath (Dot-Paths, setByPath legt fehlende Ebenen an)
 │   ├── content-guard.ts     # Barrel: re-exportiert content-guard/* (gleiche Namen, gleiche Funktionen)
 │   ├── content-guard/       # Aufgeteilte Inhaltsprüfung: base (Dateisperre/Ziele), banner, field-targets, free-drafts, list-models
 │   ├── ai-tools.ts          # KI-Werkzeuge (buildAiTools, testbar mit Adaptern; nutzt content-guard, speichert Entwürfe mit ehrlichen Hinweisen)
+│   ├── ai.ts                # KI-Modell, Datei-/Geheimnis-/Brücken-Regeln, System-Prompt (Budget + Nachladewege)
 │   ├── validate.ts          # Entwurfsprüfung (tolerante Strings) + strikte Endtypen (validateFinalJsonValue)
 │   ├── slugify.ts           # Slug-Erzeugung für Blog-Artikel
 │   └── supabase/            # server.ts, client.ts, middleware.ts, admin.ts, config.ts
 └── types/cms.ts             # Zentrale Typen (Manifest, Blog, Site, Draft, PublishHistoryEntry, DraftMap)
+supabase/                   # ai-chat-schema.sql (KI-Tabellen), cms-rls-schema.sql (Mandanten-Trennung + Storage), cms-history-files-migration.sql (files-Spalte)
 ```
 
 Path-Alias: `@/*` → `src/*` (in `tsconfig.json`).
 
 ### Supabase-Datenbankschema
 
-Tabellen: `sites` (u. a. `preview_url`, `repo_owner`, `repo_name`), `user_sites` (Zuordnung Nutzer ↔ Site), `drafts` (unveröffentlichte Feldwerte, `unique (site_id, field_id)`), `publish_history` (Snapshots als JSONB-Payload, optional `note`-Spalte), `admins`. Row Level Security ist aktiviert; Nutzer dürfen nur Zeilen ihrer zugeordneten `site_id` sehen/ändern. Bilder aus `type: "image"`-Feldern werden clientseitig in den öffentlichen Storage-Bucket `cms-media` hochgeladen (Pfad: `sites/{siteId}/{timestamp}-{dateiname}`). Das vollständige SQL-Schema inkl. Storage-Policies steht in der `README.md`.
+Tabellen: `sites` (u. a. `preview_url`, `repo_owner`, `repo_name`, `ai_enabled`), `user_sites` (Zuordnung Nutzer ↔ Site), `drafts` (unveröffentlichte Feldwerte, `unique (site_id, field_id)`), `publish_history` (Snapshots als JSONB-Payload plus `files`-Dateiliste, optional `note`-Spalte), `admins`, dazu KI-Tabellen (`ai_conversations` mit `created_by`, `ai_messages`, `code_drafts`, `ai_usage`). Row Level Security ist Pflicht und liegt versioniert in `supabase/cms-rls-schema.sql` (Mandanten-Trennung + Storage-Ordnertrennung); Nutzer sehen/ändern nur Zeilen ihrer zugeordneten `site_id`. Bilder aus `type: "image"`-Feldern werden clientseitig in den öffentlichen Storage-Bucket `cms-media` hochgeladen (Pfad: `sites/{siteId}/{timestamp}-{dateiname}`, SVG abgelehnt; Schreiben nur im eigenen Site-Ordner). Das vollständige SQL-Schema inkl. Storage-Policies steht in der `README.md`, die Migrations-Skripte unter `supabase/`.
 
 ## Konventionen und Sicherheitsrichtlinien
 
-- **Zugriffsprüfung in jeder API-Route und geschützten Seite:** Session prüfen (`supabase.auth.getUser()`), dann Mitgliedschaft in `user_sites` für die angefragte `site_id`. Ohne Zuordnung: 401/403 bzw. `notFound()`. Dieses Muster bei neuen Endpunkten beibehalten (Referenz: `authorize()` in `src/app/api/blog/route.ts`).
+- **Zugriffsprüfung in jeder API-Route und geschützten Seite:** `requireSiteAccess(siteId)` bzw. `requireAdmin()` aus `src/lib/auth.ts` verwenden (Session → `user_sites` → Site; Admins via `admins`-Tabelle). Ohne Zuordnung: 401/403 bzw. `notFound()`. Dieses Muster bei neuen Endpunkten beibehalten.
 - **Service-Role-Key niemals clientseitig** verwenden; `createAdminClient()` nur in Admin-API-Routen und immer nach einem Admin-Check gegen die `admins`-Tabelle.
 - Fehlermeldungen an den Client auf Deutsch, mit passenden HTTP-Statuscodes; GitHub-Fehler werden in `publish`/`blog` als 502 weitergegeben, in `rollback` als 500.
 - Server Components laden Daten (Supabase + GitHub), interaktive Teile sind Client Components (`"use client"`).

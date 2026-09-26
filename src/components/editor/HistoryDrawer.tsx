@@ -45,17 +45,53 @@ export function HistoryDrawer({
     setLoading(true);
     try {
       const supabase = createClient();
-      const { data, error } = await supabase
+      // W11: Nur Metadaten laden (keine schweren Payloads – die bleiben in
+      // der DB, bis eine Version wirklich zurückgerollt wird).
+      const meta = await supabase
         .from("publish_history")
-        .select("*")
+        .select("id,site_id,published_by,commit_sha,created_at,note,files")
         .eq("site_id", siteId)
         .order("created_at", { ascending: false });
-
-      if (error) {
-        onError(`Verlauf konnte nicht geladen werden: ${error.message}`);
+      if (meta.error) {
+        // files-Spalte fehlt (Migration ausstehend)? Dann klassisch voll laden.
+        if (/files/i.test(meta.error.message)) {
+          const voll = await supabase
+            .from("publish_history")
+            .select("*")
+            .eq("site_id", siteId)
+            .order("created_at", { ascending: false });
+          if (voll.error) {
+            onError(`Verlauf konnte nicht geladen werden: ${voll.error.message}`);
+            return;
+          }
+          setEntries((voll.data ?? []) as PublishHistoryEntry[]);
+          return;
+        }
+        onError(`Verlauf konnte nicht geladen werden: ${meta.error.message}`);
         return;
       }
-      setEntries((data ?? []) as PublishHistoryEntry[]);
+      let rows = (meta.data ?? []) as PublishHistoryEntry[];
+      // Legacy-Einträge ohne files: Dateinamen gebündelt nachladen (ein Abruf).
+      const ohneDateien = rows.filter((r) => !Array.isArray(r.files));
+      if (ohneDateien.length > 0) {
+        const { data: payloads } = await supabase
+          .from("publish_history")
+          .select("id,payload")
+          .eq("site_id", siteId)
+          .in(
+            "id",
+            ohneDateien.map((r) => r.id)
+          );
+        const karten = new Map(
+          ((payloads ?? []) as Array<{ id: string; payload: Record<string, unknown> | null }>).map(
+            (p) => [p.id, Object.keys(p.payload ?? {})] as const
+          )
+        );
+        rows = rows.map((r) =>
+          Array.isArray(r.files) ? r : { ...r, files: karten.get(r.id) ?? [] }
+        );
+      }
+      setEntries(rows);
     } catch {
       onError("Verlauf konnte nicht geladen werden: Supabase nicht erreichbar.");
     } finally {
@@ -159,7 +195,7 @@ export function HistoryDrawer({
 
           <ul className="space-y-3">
             {entries.map((entry) => {
-              const files = Object.keys(entry.payload ?? {});
+              const files = entry.files ?? Object.keys(entry.payload ?? {});
               const note = entry.note ?? null;
               return (
               <li

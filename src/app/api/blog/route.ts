@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import matter from "gray-matter";
 import { z } from "zod";
 import { requireSiteAccess } from "@/lib/auth";
-import { createOctokit } from "@/lib/github";
+import { createOctokit, githubFehlerGrund, isShaConflictError } from "@/lib/github";
 import { slugify } from "@/lib/slugify";
 import type { BlogPost } from "@/types/cms";
 import type { Octokit } from "@octokit/rest";
@@ -195,7 +195,7 @@ export async function GET(request: Request) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("Blog-Liste fehlgeschlagen:", message);
     return NextResponse.json(
-      { error: `Blog-Artikel konnten nicht geladen werden: ${message}` },
+      { error: "Blog-Artikel konnten nicht geladen werden. Details stehen im Server-Protokoll." },
       { status: 502 }
     );
   }
@@ -288,15 +288,42 @@ export async function POST(request: Request) {
       if (!isNotFound(err)) throw err;
     }
 
-    const { data: commitData } = await octokit.repos.createOrUpdateFileContents({
-      owner: auth.site.repo_owner,
-      repo: auth.site.repo_name,
-      path: filePath,
-      message: `cms: save blog post ${slug}`,
-      content: Buffer.from(markdown, "utf-8").toString("base64"),
-      sha,
-      branch: "main",
-    });
+    // W13: Bei Versionskonflikt (paralleles Speichern) einmal mit frischem
+    // SHA erneut versuchen, statt sofort aufzugeben.
+    let commitData;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const res = await octokit.repos.createOrUpdateFileContents({
+          owner: auth.site.repo_owner,
+          repo: auth.site.repo_name,
+          path: filePath,
+          message: `cms: save blog post ${slug}`,
+          content: Buffer.from(markdown, "utf-8").toString("base64"),
+          sha,
+          branch: "main",
+        });
+        commitData = res.data;
+        break;
+      } catch (err) {
+        if (attempt === 0 && isShaConflictError(err)) {
+          try {
+            const { data } = await octokit.repos.getContent({
+              owner: auth.site.repo_owner,
+              repo: auth.site.repo_name,
+              path: filePath,
+              ref: "main",
+            });
+            if (!Array.isArray(data) && data.type === "file") {
+              sha = data.sha;
+              continue;
+            }
+          } catch {
+            // Frisches Laden scheiterte – unten als Fehler melden
+          }
+        }
+        throw err;
+      }
+    }
 
     return NextResponse.json({
       message: sha
@@ -304,15 +331,14 @@ export async function POST(request: Request) {
         : `Beitrag "${frontmatter.title}" wurde veröffentlicht.`,
       post: {
         path: filePath,
-        sha: commitData.content?.sha ?? "",
+        sha: commitData!.content?.sha ?? "",
         ...frontmatter,
       } satisfies BlogPost,
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("Blog-Speichern fehlgeschlagen:", message);
+    console.error("Blog-Speichern fehlgeschlagen:", err instanceof Error ? err.message : err);
     return NextResponse.json(
-      { error: `Beitrag konnte nicht gespeichert werden: ${message}` },
+      { error: `Beitrag konnte nicht gespeichert werden: ${githubFehlerGrund(err)}` },
       { status: 502 }
     );
   }
@@ -346,21 +372,45 @@ export async function DELETE(request: Request) {
 
   try {
     const octokit = createOctokit();
-    await octokit.repos.deleteFile({
-      owner: auth.site.repo_owner,
-      repo: auth.site.repo_name,
-      path,
-      message: `cms: delete blog post ${slug}`,
-      sha,
-      branch: "main",
-    });
+    // W13: Bei Versionskonflikt einmal mit frischem SHA erneut versuchen.
+    let currentSha = sha;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await octokit.repos.deleteFile({
+          owner: auth.site.repo_owner,
+          repo: auth.site.repo_name,
+          path,
+          message: `cms: delete blog post ${slug}`,
+          sha: currentSha,
+          branch: "main",
+        });
+        break;
+      } catch (err) {
+        if (attempt === 0 && isShaConflictError(err)) {
+          try {
+            const { data } = await octokit.repos.getContent({
+              owner: auth.site.repo_owner,
+              repo: auth.site.repo_name,
+              path,
+              ref: "main",
+            });
+            if (!Array.isArray(data) && data.type === "file") {
+              currentSha = data.sha;
+              continue;
+            }
+          } catch {
+            // Frisches Laden scheiterte – unten als Fehler melden
+          }
+        }
+        throw err;
+      }
+    }
 
     return NextResponse.json({ message: `Beitrag "${slug}" wurde gelöscht.` });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("Blog-Löschen fehlgeschlagen:", message);
+    console.error("Blog-Löschen fehlgeschlagen:", err instanceof Error ? err.message : err);
     return NextResponse.json(
-      { error: `Beitrag konnte nicht gelöscht werden: ${message}` },
+      { error: `Beitrag konnte nicht gelöscht werden: ${githubFehlerGrund(err)}` },
       { status: 502 }
     );
   }

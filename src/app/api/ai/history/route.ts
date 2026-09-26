@@ -14,7 +14,8 @@ export async function GET(request: Request) {
 
   // W10: Nur eigene Gespräche (plus alte ohne Ersteller) – fremde
   // Gespräche derselben Site bleiben unsichtbar.
-  const { data: conv } = await supabase
+  // W12: DB-Fehler nicht still als „kein Verlauf" werten.
+  const { data: conv, error: convError } = await supabase
     .from("ai_conversations")
     .select("id,title,updated_at,created_by")
     .eq("site_id", verifiedSiteId)
@@ -22,18 +23,33 @@ export async function GET(request: Request) {
     .order("updated_at", { ascending: false })
     .limit(1)
     .maybeSingle();
+  if (convError) {
+    console.error("ai/history: Gespräche laden fehlgeschlagen:", convError.message);
+    return NextResponse.json(
+      { error: "Verlauf konnte nicht geladen werden. Details stehen im Server-Protokoll." },
+      { status: 500 }
+    );
+  }
 
   if (!conv) {
     return NextResponse.json({ conversation: null, messages: [] });
   }
   const conversation = conv as { id: string; title: string; updated_at: string };
 
-  const { data: rows } = await supabase
+  // W12: DB-Fehler nicht still als „kein Verlauf" werten.
+  const { data: rows, error: rowsError } = await supabase
     .from("ai_messages")
     .select("role,content,created_at")
     .eq("conversation_id", conversation.id)
     .order("created_at", { ascending: true })
     .limit(40);
+  if (rowsError) {
+    console.error("ai/history: Nachrichten laden fehlgeschlagen:", rowsError.message);
+    return NextResponse.json(
+      { error: "Verlauf konnte nicht geladen werden. Details stehen im Server-Protokoll." },
+      { status: 500 }
+    );
+  }
 
   const messages = ((rows ?? []) as Array<{ role: string; content: { text?: string; dateien?: Array<{ name?: string; url?: string; mediaType?: string }> } | null }>)
     .filter((r) => r.role === "user" || r.role === "assistant")

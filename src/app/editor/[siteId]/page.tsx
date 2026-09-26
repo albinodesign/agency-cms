@@ -1,6 +1,6 @@
 import { redirect, notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { createOctokit, getManifest, getRepoFile } from "@/lib/github";
+import { createOctokit, getManifestRaw, getRepoFile, normalizeManifestWithWarnings } from "@/lib/github";
 import { getByPath } from "@/lib/json-path";
 import { EditorClient } from "@/components/editor/EditorClient";
 import type { CmsManifest, Draft, DraftMap, Site } from "@/types/cms";
@@ -61,11 +61,16 @@ export default async function EditorPage({ params }: EditorPageProps) {
   let manifest: CmsManifest | null = null;
   let manifestError: string | null = null;
   let contentWarning: string | null = null;
+  // W16: Stille Manifest-Deutungen (Tippfehler der Website) für die Warnbox
+  let manifestWarnings: string[] = [];
   const liveValues: DraftMap = {};
 
   try {
     const octokit = createOctokit();
-    manifest = await getManifest(octokit, typedSite.repo_owner, typedSite.repo_name);
+    const { parsed } = await getManifestRaw(octokit, typedSite.repo_owner, typedSite.repo_name);
+    const normalized = normalizeManifestWithWarnings(parsed);
+    manifest = normalized.manifest;
+    manifestWarnings = normalized.hinweise;
 
     // Alle referenzierten Content-Dateien laden – strikt nur .json,
     // damit z. B. Markdown-Dateien aus src/content/blog/ niemals an JSON.parse gehen.
@@ -170,6 +175,7 @@ export default async function EditorPage({ params }: EditorPageProps) {
       site={typedSite}
       manifest={manifest}
       manifestError={manifestError}
+      manifestWarnings={manifestWarnings}
       contentWarning={contentWarning}
       initialValues={initialValues}
       liveValues={liveValues}

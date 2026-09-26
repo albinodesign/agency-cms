@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireSiteAccess } from "@/lib/auth";
+import { insertPublishHistory } from "@/lib/history";
 import { commitFileWithRetry, createOctokit, getManifest, getRepoFile } from "@/lib/github";
 import { AI_MAX_FILE_CHARS, breaksBridge, isAllowedCodePath, isAllowedContentPath } from "@/lib/ai";
 import {
@@ -79,6 +80,12 @@ export async function POST(request: Request) {
     }
 
     const payload: unknown = (entry as PublishHistoryEntry).payload;
+    if (payload === undefined || payload === null) {
+      return NextResponse.json(
+        { error: "Diese Version enthält keinen wiederherstellbaren Payload." },
+        { status: 400 }
+      );
+    }
 
     if (!isValidPayload(payload)) {
       return NextResponse.json(
@@ -223,8 +230,12 @@ export async function POST(request: Request) {
         }
       );
       if (!commitResult.ok) {
-        console.error(`Rollback: Commit für "${filePath}" fehlgeschlagen:`, commitResult.error);
-        failedFiles.push({ file: filePath, error: commitResult.error.replace(/^GitHub-Commit für "[^"]+" fehlgeschlagen: /, "GitHub-Fehler beim Committen: ") });
+        console.error(`Rollback: Commit für "${filePath}" fehlgeschlagen (Details oben).`);
+        failedFiles.push({
+          file: filePath,
+          error: commitResult.error
+            .replace(/^GitHub-Commit für "[^"]+" fehlgeschlagen: /, `GitHub-Fehler beim Zurückrollen von "${filePath}": `),
+        });
         continue;
       }
       lastCommitSha = commitResult.sha;
@@ -257,7 +268,7 @@ export async function POST(request: Request) {
       console.error("Rollback: drafts laden fehlgeschlagen:", draftsLoadError.message);
       return NextResponse.json(
         {
-          error: `Rollback wurde committet (${restoredFiles.length} Datei(en)), aber die Entwürfe konnten nicht geprüft werden: ${draftsLoadError.message} – Entwürfe bleiben erhalten, bitte ggf. manuell aufräumen.`,
+          error: `Rollback wurde committet (${restoredFiles.length} Datei(en)), aber die Entwürfe konnten nicht geprüft werden – Entwürfe bleiben erhalten, bitte ggf. manuell aufräumen. Details stehen im Server-Protokoll.`,
         },
         { status: 500 }
       );
@@ -285,7 +296,7 @@ export async function POST(request: Request) {
         console.error("Rollback: drafts delete fehlgeschlagen:", deleteError.message);
         return NextResponse.json(
           {
-            error: `Rollback wurde committet, aber die Entwürfe konnten nicht gelöscht werden: ${deleteError.message}`,
+            error: "Rollback wurde committet, aber die Entwürfe konnten nicht gelöscht werden. Details stehen im Server-Protokoll.",
           },
           { status: 500 }
         );
@@ -302,7 +313,8 @@ export async function POST(request: Request) {
       console.error("Rollback: code_drafts delete fehlgeschlagen:", codeDeleteError.message);
     }
 
-    // Rollback als neuen Verlaufseintrag dokumentieren (mit Notiz "Rollback").
+    // Rollback als neuen Verlaufseintrag dokumentieren (mit Notiz "Rollback",
+    // plus Dateiliste – mit Fallbacks für alte Tabellen, src/lib/history.ts).
     // Gesichert wird nur, was wirklich zurückgerollt wurde.
     const restoredPayload: Payload = {};
     for (const filePath of restoredFiles) {
@@ -313,21 +325,11 @@ export async function POST(request: Request) {
       published_by: user.id ?? null,
       commit_sha: lastCommitSha,
       payload: restoredPayload,
+      note: "Rollback",
     };
-    const { error: historyError } = await supabase
-      .from("publish_history")
-      .insert({ ...historyRow, note: "Rollback" });
-
+    const { error: historyError } = await insertPublishHistory(supabase, historyRow, restoredFiles);
     if (historyError) {
-      // Fallback für Tabellen ohne "note"-Spalte
-      const { error: retryError } = await supabase
-        .from("publish_history")
-        .insert(historyRow);
-      if (retryError) {
-        console.error("Rollback: publish_history insert fehlgeschlagen:", retryError);
-      } else {
-        console.log(`publish_history: Rollback für Site ${siteId} gespeichert (Commit ${lastCommitSha ?? "unbekannt"})`);
-      }
+      console.error("Rollback: publish_history insert fehlgeschlagen (Details oben).");
     } else {
       console.log(`publish_history: Rollback für Site ${siteId} gespeichert (Commit ${lastCommitSha ?? "unbekannt"})`);
     }

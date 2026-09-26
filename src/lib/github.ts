@@ -31,6 +31,29 @@ export function isShaConflictError(err: unknown): boolean {
   return /409|sha|conflict|does not match|stale|veraltet/i.test(msg);
 }
 
+/**
+ * Kundentauglicher Grund für einen gescheiterten GitHub-Schreibvorgang (W12).
+ * Bekannte Fälle bleiben verständlich, alles andere wird bewusst allgemein
+ * gehalten – Rohmeldungen (Rate-Limits, Token-Hinweise, Pfade) gehören nur
+ * ins Server-Protokoll, niemals an den Browser.
+ */
+export function githubFehlerGrund(err: unknown): string {
+  const status =
+    typeof err === "object" && err !== null && "status" in err
+      ? (err as { status: unknown }).status
+      : null;
+  if (status === 404) {
+    return "Die Datei wurde inzwischen gelöscht oder verschoben.";
+  }
+  if (status === 409) {
+    return "Gleichzeitige Änderung – bitte erneut versuchen.";
+  }
+  if (status === 403 || status === 429) {
+    return "Der Zugriff ist gerade begrenzt – bitte in einer Minute erneut versuchen.";
+  }
+  return "Details stehen im Server-Protokoll – bitte erneut versuchen.";
+}
+
 export interface FileCommit {
   /** Dateipfad im Repo */
   file: string;
@@ -48,6 +71,8 @@ export type CommitResult =
  * Committet eine Datei auf main (W3, gemeinsam für Publish und Rollback).
  * Bei SHA-Konflikt wird der frische Stand einmal über reloadSha() geladen
  * und erneut versucht – erst danach gilt der Commit als fehlgeschlagen.
+ * Der Fehlertext ist kundentauglich (W12), die Rohmeldung landet nur im
+ * Server-Protokoll.
  */
 export async function commitFileWithRetry(
   octokit: Octokit,
@@ -79,11 +104,13 @@ export async function commitFileWithRetry(
           // Frisches Laden scheiterte ebenfalls – unten als Fehler melden
         }
       }
+      console.error(
+        `GitHub-Commit für "${commit.file}" fehlgeschlagen:`,
+        err instanceof Error ? err.message : err
+      );
       return {
         ok: false,
-        error: `GitHub-Commit für "${commit.file}" fehlgeschlagen: ${
-          err instanceof Error ? err.message : "Unbekannter Fehler"
-        }`,
+        error: `GitHub-Commit für "${commit.file}" fehlgeschlagen: ${githubFehlerGrund(err)}`,
       };
     }
   }
@@ -151,10 +178,14 @@ function pickString(...values: unknown[]): string | undefined {
  * Normalisiert ein Roh-Feld in ein ManifestField.
  * Liefert null, wenn Pflichtangaben (id, file, path) fehlen.
  * Unbekannte Typen werden als "text" übernommen, das Label fällt auf
- * title bzw. id zurück.
+ * title bzw. id zurück. Hinweise (W16) machen stille Deutungen sichtbar,
+ * damit Tippfehler im Website-Manifest auffallen statt zu wirken.
  */
-function normalizeField(field: unknown): ManifestField | null {
-  if (typeof field !== "object" || field === null) return null;
+function normalizeField(field: unknown, hinweise?: string[]): ManifestField | null {
+  if (typeof field !== "object" || field === null) {
+    hinweise?.push("Ein Eintrag ist kein Objekt und wurde weggelassen.");
+    return null;
+  }
   const f = field as Partial<ManifestField> & { title?: unknown };
 
   if (
@@ -162,12 +193,16 @@ function normalizeField(field: unknown): ManifestField | null {
     typeof f.file !== "string" ||
     typeof f.path !== "string"
   ) {
+    hinweise?.push("Ein Eintrag ohne id, Datei oder Pfad wurde weggelassen.");
     return null;
   }
 
   const type = ALLOWED_FIELD_TYPES.includes(f.type as FieldType)
     ? (f.type as FieldType)
     : "text";
+  if (type === "text" && f.type !== undefined && f.type !== "text") {
+    hinweise?.push(`Feld "${f.id}": Typ "${String(f.type)}" ist unbekannt und wird als Text behandelt.`);
+  }
 
   return {
     ...f,
@@ -185,14 +220,28 @@ function normalizeField(field: unknown): ManifestField | null {
  * oder { fields: [...] }. Ungültige Felder/Sektionen werden herausgefiltert.
  */
 export function normalizeManifest(raw: unknown): CmsManifest {
+  return normalizeManifestWithWarnings(raw).manifest;
+}
+
+/**
+ * Wie normalizeManifest, meldet zusätzlich stille Deutungen (W16):
+ * unbekannte Typen (→ Text), weggelassene Einträge, vergebene Fallback-
+ * Kennungen und ausgeblendete leere Sektionen. Der Editor zeigt sie als
+ * Warnung, damit Website-Tippfehler auffallen.
+ */
+export function normalizeManifestWithWarnings(raw: unknown): { manifest: CmsManifest; hinweise: string[] } {
+  const hinweise: string[] = [];
   const candidate = Array.isArray(raw)
     ? raw
     : ((raw as CmsManifest)?.sections ?? (raw as { fields?: unknown[] })?.fields ?? []);
 
   if (!Array.isArray(candidate)) {
     return {
-      sections: [],
-      features: Array.isArray(raw) ? undefined : (raw as CmsManifest)?.features,
+      manifest: {
+        sections: [],
+        features: Array.isArray(raw) ? undefined : (raw as CmsManifest)?.features,
+      },
+      hinweise,
     };
   }
 
@@ -211,31 +260,40 @@ export function normalizeManifest(raw: unknown): CmsManifest {
         },
       ];
 
-  const sections = rawSections
+  const sections: ManifestSection[] = [];
+  rawSections
     .filter((s) => typeof s === "object" && s !== null)
-    .map((s, index) => {
-      const raw = s as ManifestSection & {
+    .forEach((s, index) => {
+      const rawSection = s as ManifestSection & {
         section?: unknown;
         label?: unknown;
         sectionLabel?: unknown;
       };
-      return {
-        id: pickString(raw.id, raw.section) ?? `section-${index}`,
+      const id = pickString(rawSection.id, rawSection.section) ?? `section-${index}`;
+      if (!pickString(rawSection.id, rawSection.section)) {
+        hinweise.push(`Sektion ${index + 1} hat keine Kennung und heißt jetzt "${id}".`);
+      }
+      const fields = (Array.isArray(s.fields) ? s.fields : [])
+        .map((f) => normalizeField(f, hinweise))
+        .filter((f): f is ManifestField => f !== null);
+      if (fields.length === 0) {
+        hinweise.push(`Sektion "${id}" enthält keine gültigen Felder und wird ausgeblendet.`);
+        return;
+      }
+      sections.push({
+        id,
         title:
-          pickString(raw.label, raw.title, raw.sectionLabel, raw.id, raw.section) ??
+          pickString(rawSection.label, rawSection.title, rawSection.sectionLabel, rawSection.id, rawSection.section) ??
           `Sektion ${index + 1}`,
-        fields: (Array.isArray(s.fields) ? s.fields : [])
-          .map(normalizeField)
-          .filter((f): f is ManifestField => f !== null),
-      };
-    })
-    .filter((s) => s.fields.length > 0);
+        fields,
+      });
+    });
 
   const features = Array.isArray(raw)
     ? undefined
     : (raw as CmsManifest)?.features;
 
-  return { sections, features };
+  return { manifest: { sections, features }, hinweise };
 }
 
 export async function getManifest(

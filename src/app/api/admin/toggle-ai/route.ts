@@ -26,8 +26,9 @@ export async function POST(request: Request) {
       .eq("id", body.siteId);
 
     if (error) {
+      console.error("toggle-ai fehlgeschlagen:", error.message);
       return NextResponse.json(
-        { error: `Schalter konnte nicht umgelegt werden: ${error.message}` },
+        { error: "Schalter konnte nicht umgelegt werden. Details stehen im Server-Protokoll." },
         { status: 500 }
       );
     }
