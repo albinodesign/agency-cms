@@ -2,6 +2,7 @@
 
 import { ImageField } from "@/components/editor/ImageField";
 import { UndoButton } from "@/components/editor/UndoButton";
+import { validateDraftValue } from "@/lib/validate";
 import type { ManifestField } from "@/types/cms";
 
 export function FieldEditor({
@@ -32,6 +33,11 @@ export function FieldEditor({
     ? `${value.length} / ${field.maxLength} Zeichen`
     : `${value.length} Zeichen`;
   const counterTooLong = field.maxLength != null && value.length > field.maxLength;
+  // W7: Gleiche Prüfung wie der Server – Fehler sofort am Feld zeigen,
+  // statt erst nach dem Publish (leere Werte sind ok = Feld leeren).
+  const fehler = validateDraftValue(field.type, value, field.maxLength);
+  const inputClass = (base: string) =>
+    fehler ? `${base} border-red-400 focus:border-red-600 focus:ring-red-600/10` : base;
 
   // Anker-ID für "Klick in Vorschau springt hierher" + kurze Gelb-Markierung
   return (
@@ -55,6 +61,11 @@ export function FieldEditor({
             onChange={onChange}
             onError={onError}
           />
+          {fehler && (
+            <p role="alert" className="mt-1 text-xs font-medium text-red-600">
+              {fehler} (Wird so nicht veröffentlicht – bitte korrigieren.)
+            </p>
+          )}
         </>
       ) : (
         <div>
@@ -72,7 +83,8 @@ export function FieldEditor({
               placeholder={field.placeholder}
               maxLength={field.maxLength}
               onChange={(e) => onChange(e.target.value)}
-              className={baseClass}
+              className={inputClass(baseClass)}
+              aria-invalid={fehler !== null}
             />
           )}
 
@@ -83,7 +95,8 @@ export function FieldEditor({
               placeholder={field.placeholder}
               maxLength={field.maxLength}
               onChange={(e) => onChange(e.target.value)}
-              className={baseClass}
+              className={inputClass(baseClass)}
+              aria-invalid={fehler !== null}
             />
           )}
 
@@ -94,7 +107,8 @@ export function FieldEditor({
               maxLength={field.maxLength}
               onChange={(e) => onChange(e.target.value)}
               rows={4}
-              className={`${baseClass} resize-y`}
+              className={inputClass(`${baseClass} resize-y`)}
+              aria-invalid={fehler !== null}
             />
           )}
 
@@ -128,6 +142,11 @@ export function FieldEditor({
           >
             {counter}
           </p>
+          {fehler && (
+            <p role="alert" className="mt-1 text-xs font-medium text-red-600">
+              {fehler} (Wird so nicht veröffentlicht – bitte korrigieren.)
+            </p>
+          )}
         </div>
       )}
     </div>

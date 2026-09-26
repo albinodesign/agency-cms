@@ -93,25 +93,35 @@ export async function POST(request: Request) {
 
   // Gespräch laden oder anlegen (Titel aus erster Nachricht).
   // Der Kunde schickt eine eigene ID mit – so geht beim Neuladen nichts verloren.
+  // W10: Ein Gespräch gehört seinem Ersteller – fremde Gespräche derselben
+  // Site lassen sich weder mitlesen noch fortschreiben. Alte Gespräche ohne
+  // Ersteller (created_by null) werden beim ersten Aufruf übernommen.
   const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   let convId = typeof conversationId === "string" && conversationId ? conversationId : null;
   if (convId && !uuidRe.test(convId)) convId = null;
   if (convId) {
     const { data: conv } = await supabase
       .from("ai_conversations")
-      .select("id")
+      .select("id,created_by")
       .eq("id", convId)
-      .eq("site_id", siteId)
+      .eq("site_id", site.id)
       .maybeSingle();
+    const owner = (conv as { id: string; created_by: string | null } | null)?.created_by ?? null;
     if (!conv) {
       // Neue ID vom Kunden: Gespräch damit anlegen
       const { error } = await supabase.from("ai_conversations").insert({
         id: convId,
-        site_id: siteId,
+        site_id: site.id,
         created_by: user.id,
         title: userContent.slice(0, 60) || "Neues Gespräch",
       });
       if (error) convId = null;
+    } else if (owner !== null && owner !== user.id) {
+      // Fremdes Gespräch: nicht übernehmen, frisches Gespräch beginnen
+      convId = null;
+    } else if (owner === null) {
+      // Altes Gespräch ohne Ersteller: übernehmen
+      await supabase.from("ai_conversations").update({ created_by: user.id }).eq("id", convId);
     }
   }
   if (!convId) {

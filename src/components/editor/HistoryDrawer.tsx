@@ -105,11 +105,9 @@ export function HistoryDrawer({
           : (body.message ?? "Version wurde erfolgreich wiederhergestellt.")
       );
 
-      // Harter Browser-Reload, damit React Formularfelder und Iframe
-      // komplett neu initialisiert (kein router.refresh()!)
-      window.setTimeout(() => {
-        window.location.reload();
-      }, 900);
+      // W6: Kein harter Reload mehr – der Editor lädt Serverdaten neu und
+      // setzt das Formular weich zurück (siehe onSuccess beim Aufrufer).
+      setRestoringId(null);
     } catch {
       onError("Server nicht erreichbar. Bitte später erneut versuchen.");
       setRestoringId(null);

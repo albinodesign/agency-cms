@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import matter from "gray-matter";
+import { z } from "zod";
 import { requireSiteAccess } from "@/lib/auth";
 import { createOctokit } from "@/lib/github";
 import { slugify } from "@/lib/slugify";
@@ -7,6 +8,69 @@ import type { BlogPost } from "@/types/cms";
 import type { Octokit } from "@octokit/rest";
 
 const BLOG_DIR = "src/content/blog";
+
+/** W9: Frontmatter-Grenzen – nichts Riesiges, nichts Skriptartiges. */
+const MAX_BLOG_TITLE = 200;
+const MAX_BLOG_EXCERPT = 500;
+const MAX_BLOG_ALT = 200;
+const MAX_BLOG_CONTENT = 100_000;
+
+/** https-Adresse oder interne/relative Bildreferenz (niemals javascript:/data:). */
+const coverImageSchema = z
+  .string()
+  .max(2000, "Das Beitragsbild ist zu lang (max. 2000 Zeichen).")
+  .refine(
+    (v) => {
+      const t = v.trim();
+      if (t === "") return true;
+      try {
+        const url = new URL(t);
+        return url.protocol === "https:" || url.protocol === "http:";
+      } catch {
+        return (
+          t.startsWith("/") &&
+          !t.startsWith("//") &&
+          !t.includes("..") &&
+          !/["'<>\\\s]/.test(t)
+        );
+      }
+    },
+    "Das Beitragsbild muss eine http(s)-Adresse oder ein interner Pfad (/bilder/…) sein."
+  );
+
+const blogFrontmatterSchema = z.object({
+  title: z
+    .string("Titel fehlt.")
+    .trim()
+    .min(1, "Titel fehlt.")
+    .max(MAX_BLOG_TITLE, `Der Titel ist zu lang (max. ${MAX_BLOG_TITLE} Zeichen).`),
+  date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "Das Datum braucht das Format JJJJ-MM-TT.")
+    .refine((v) => !Number.isNaN(Date.parse(v)), "Das Datum ist kein gültiges Kalenderdatum.")
+    .optional(),
+  coverImage: coverImageSchema.optional().default(""),
+  coverImageAlt: z
+    .string()
+    .max(MAX_BLOG_ALT, `Der Bild-Alt-Text ist zu lang (max. ${MAX_BLOG_ALT} Zeichen).`)
+    .optional()
+    .default(""),
+  excerpt: z
+    .string()
+    .max(MAX_BLOG_EXCERPT, `Die Kurzbeschreibung ist zu lang (max. ${MAX_BLOG_EXCERPT} Zeichen).`)
+    .optional()
+    .default(""),
+  draft: z.boolean().optional().default(false),
+});
+
+const blogPostSchema = z.object({
+  frontmatter: blogFrontmatterSchema,
+  content: z
+    .string()
+    .max(MAX_BLOG_CONTENT, "Der Artikeltext ist zu lang (max. 100.000 Zeichen).")
+    .optional()
+    .default(""),
+});
 
 /** Strikte Pfad-Whitelist: nur src/content/blog/<slug>.md mit [a-z0-9-] im Dateinamen. */
 const VALID_BLOG_PATH = /^src\/content\/blog\/[a-z0-9-]+\.md$/;
@@ -166,21 +230,38 @@ export async function POST(request: Request) {
   }
 
   const fm = body.frontmatter ?? {};
-  if (!fm.title?.trim()) {
+  // W9: Eingaben erst auf Strings normieren (falsche Typen → deutsche
+  // Meldung statt englischem Zod-Standardtext), dann streng validieren.
+  const normiert = {
+    title: typeof fm.title === "string" ? fm.title : "",
+    date: typeof fm.date === "string" ? fm.date : undefined,
+    coverImage: typeof fm.coverImage === "string" ? fm.coverImage : "",
+    coverImageAlt: typeof fm.coverImageAlt === "string" ? fm.coverImageAlt : "",
+    excerpt: typeof fm.excerpt === "string" ? fm.excerpt : "",
+    draft: fm.draft === true,
+  };
+  const inhalt = typeof body.content === "string" ? body.content : "";
+  const parsed = blogPostSchema.safeParse({ frontmatter: normiert, content: inhalt });
+  if (!parsed.success) {
+    const first = parsed.error.issues[0];
+    return NextResponse.json({ error: first?.message ?? "Blog-Daten ungültig." }, { status: 400 });
+  }
+  const valid = parsed.data;
+  if (!valid.frontmatter.title.trim()) {
     return NextResponse.json({ error: "Titel fehlt." }, { status: 400 });
   }
 
   const frontmatter = {
-    title: fm.title.trim(),
+    title: valid.frontmatter.title.trim(),
     slug,
-    date: fm.date || new Date().toISOString().slice(0, 10),
-    coverImage: fm.coverImage ?? "",
-    coverImageAlt: fm.coverImageAlt || fm.title || "",
-    excerpt: fm.excerpt ?? "",
-    draft: fm.draft === true,
+    date: valid.frontmatter.date || new Date().toISOString().slice(0, 10),
+    coverImage: valid.frontmatter.coverImage ?? "",
+    coverImageAlt: valid.frontmatter.coverImageAlt || valid.frontmatter.title || "",
+    excerpt: valid.frontmatter.excerpt ?? "",
+    draft: valid.frontmatter.draft === true,
   };
 
-  const markdown = matter.stringify(`\n${body.content ?? ""}\n`, frontmatter);
+  const markdown = matter.stringify(`\n${valid.content ?? ""}\n`, frontmatter);
   const filePath = `${BLOG_DIR}/${slug}.md`;
 
   // Defense in Depth: der erzeugte Pfad muss dem Blog-Pfad-Schema entsprechen

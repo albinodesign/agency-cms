@@ -87,6 +87,12 @@ export function ImageField({
       onError("Nur Bilddateien sind erlaubt (PNG, JPG, WebP, …).");
       return;
     }
+    // W10: SVG ablehnen – skalierbare Vektorgrafiken können Skripte enthalten
+    // und liefen als öffentliche Datei im Bucket (kein SVG-Upload, PNG/JPG/WebP nutzen).
+    if (file.type === "image/svg+xml" || /\.svg$/i.test(file.name)) {
+      onError("SVG-Bilder sind aus Sicherheitsgründen nicht erlaubt. Bitte PNG, JPG oder WebP verwenden.");
+      return;
+    }
     if (file.size > MAX_ORIGINAL_BYTES) {
       onError("Dieses Bild ist größer als 15 MB. Bitte wähle ein kleineres Bild.");
       return;

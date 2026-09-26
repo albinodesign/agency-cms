@@ -9,13 +9,16 @@ export async function GET(request: Request) {
   // Zugriff prüfen (zentral: Session + user_sites + Site, src/lib/auth.ts)
   const access = await requireSiteAccess(siteId);
   if (!access.ok) return access.error;
-  const { supabase, site } = access;
+  const { supabase, user, site } = access;
   const verifiedSiteId = site.id;
 
+  // W10: Nur eigene Gespräche (plus alte ohne Ersteller) – fremde
+  // Gespräche derselben Site bleiben unsichtbar.
   const { data: conv } = await supabase
     .from("ai_conversations")
-    .select("id,title,updated_at")
+    .select("id,title,updated_at,created_by")
     .eq("site_id", verifiedSiteId)
+    .or(`created_by.eq.${user.id},created_by.is.null`)
     .order("updated_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -23,11 +26,12 @@ export async function GET(request: Request) {
   if (!conv) {
     return NextResponse.json({ conversation: null, messages: [] });
   }
+  const conversation = conv as { id: string; title: string; updated_at: string };
 
   const { data: rows } = await supabase
     .from("ai_messages")
     .select("role,content,created_at")
-    .eq("conversation_id", (conv as { id: string }).id)
+    .eq("conversation_id", conversation.id)
     .order("created_at", { ascending: true })
     .limit(40);
 
@@ -40,5 +44,5 @@ export async function GET(request: Request) {
     }))
     .filter((m) => m.text !== "" || m.dateien.length > 0);
 
-  return NextResponse.json({ conversation: conv, messages });
+  return NextResponse.json({ conversation, messages });
 }

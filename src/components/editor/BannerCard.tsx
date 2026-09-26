@@ -1,5 +1,6 @@
 "use client";
 
+import { getBannerProblems, validateBannerValue } from "@/lib/content-guard";
 import type { DraftMap } from "@/types/cms";
 
 const BANNER_FILE = "src/content/site.json";
@@ -26,6 +27,14 @@ export function BannerCard({
   const enabled = (values[BANNER_ENABLED_ID] ?? "") === "true";
   const variant = values[BANNER_VARIANT_ID] ?? "vacation";
   const text = values[BANNER_TEXT_ID] ?? "";
+  // W7: Banner-Regeln live zeigen (gleiche Prüfung wie der Server).
+  // Einzel-Hinweis fürs Textfeld + Gesamtstand für „an braucht Stil + Text".
+  const textFehler = validateBannerValue("text", text);
+  const standProbleme = getBannerProblems({
+    enabled,
+    variant: values[BANNER_VARIANT_ID],
+    ...(values[BANNER_TEXT_ID] !== undefined ? { text } : {}),
+  });
 
   return (
     <div className="mb-4 rounded-2xl border border-zinc-200 bg-zinc-50/50 p-4">
@@ -81,12 +90,27 @@ export function BannerCard({
               maxLength={160}
               onChange={(e) => onChange(BANNER_TEXT_ID, e.target.value)}
               placeholder="Wir sind vom 01. bis 15. August im Betriebsurlaub."
-              className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10"
+              aria-invalid={textFehler !== null}
+              className={`w-full rounded-lg border bg-white px-3 py-2 text-sm outline-none transition focus:ring-2 ${
+                textFehler
+                  ? "border-red-400 focus:border-red-600 focus:ring-red-600/10"
+                  : "border-zinc-300 focus:border-zinc-900 focus:ring-zinc-900/10"
+              }`}
             />
             <p className="mt-1 text-right text-xs text-zinc-400">
               {text.length} / 160 Zeichen
             </p>
+            {textFehler && (
+              <p role="alert" className="mt-1 text-xs font-medium text-red-600">
+                {textFehler}
+              </p>
+            )}
           </div>
+          {enabled && standProbleme.length > 0 && (
+            <p role="alert" className="text-xs font-medium text-red-600">
+              {standProbleme[0]} (Erst korrigieren, dann veröffentlichen.)
+            </p>
+          )}
         </div>
       )}
     </div>

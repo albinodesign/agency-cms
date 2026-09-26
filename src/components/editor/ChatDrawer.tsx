@@ -217,6 +217,11 @@ export function ChatDrawer({
           onError(`"${file.name}" geht nicht – nur Bilder und PDFs sind erlaubt.`);
           continue;
         }
+        // W10: SVG ablehnen (Skript-Gefahr im öffentlichen Bucket)
+        if (file.type === "image/svg+xml" || /\.svg$/i.test(file.name)) {
+          onError(`"${file.name}" geht nicht – SVG-Bilder sind aus Sicherheitsgründen nicht erlaubt.`);
+          continue;
+        }
         if (file.size > MAX_CHAT_FILE_BYTES) {
           onError(`"${file.name}" ist größer als 15 MB. Bitte eine kleinere Datei wählen.`);
           continue;

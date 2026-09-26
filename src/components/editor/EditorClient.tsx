@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { HistoryDrawer } from "@/components/editor/HistoryDrawer";
 import { ChatDrawer } from "@/components/editor/ChatDrawer";
@@ -187,6 +188,55 @@ export function EditorClient({
   const selectFlashRef = useRef<number | null>(null);
   // Echte Aufbau-Abfrage nach dem Veröffentlichen (wird beim Verlassen gestoppt)
   const deployPollRef = useRef<number | null>(null);
+  // W8: Parallele Tabs – neuester bekannter Entwurfs-Stempel + Warnung bei Fremdänderung
+  const draftsBaselineRef = useRef<string | null>(null);
+  const [externalChange, setExternalChange] = useState(false);
+  // W6: Nach Wiederherstellung frische Serverdaten laden + Formular weich zurücksetzen
+  const [pendingRestore, setPendingRestore] = useState(false);
+  const router = useRouter();
+
+  // Neueste Entwurfs-Änderung dieser Site lesen (für W8-Vergleich)
+  const readLatestDraftStamp = useCallback(async (): Promise<string | null> => {
+    try {
+      const supabase = createClient();
+      const { data } = await supabase
+        .from("drafts")
+        .select("updated_at")
+        .eq("site_id", site.id)
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const stamp = (data as { updated_at?: string } | null)?.updated_at;
+      return typeof stamp === "string" ? stamp : null;
+    } catch {
+      return null;
+    }
+  }, [site.id]);
+
+  // W8: Basis-Stempel beim Öffnen merken, danach alle 20 s prüfen, ob ein
+  // anderes Fenster/Tab Entwürfe gespeichert hat (eigene In-Flights ausblenden).
+  useEffect(() => {
+    let stopped = false;
+    void readLatestDraftStamp().then((stamp) => {
+      if (!stopped) draftsBaselineRef.current = stamp;
+    });
+    const timer = window.setInterval(async () => {
+      if (stopped || document.hidden) return;
+      if (pendingRef.current > 0 || timersRef.current.size > 0) return;
+      const stamp = await readLatestDraftStamp();
+      if (stopped || !stamp) return;
+      if (draftsBaselineRef.current !== null && stamp > draftsBaselineRef.current) {
+        draftsBaselineRef.current = stamp;
+        setExternalChange(true);
+      } else if (draftsBaselineRef.current === null) {
+        draftsBaselineRef.current = stamp;
+      }
+    }, 20_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [readLatestDraftStamp]);
 
   // Blog-Feature aktiviert? (features.blog === true oder features.blog.enabled === true)
   const blogEnabled = useMemo(() => {
@@ -293,6 +343,40 @@ export function EditorClient({
     [pushToast]
   );
 
+  // W6: Wiederherstellung ohne Reload – Serverdaten neu laden, dann das
+  // Formular auf den frischen Stand setzen (Werte, Live-Vergleich, Drafts,
+  // Vorschau). Laufende Autosave-Timer werden verworfen, damit keine alten
+  // Tipp-Stände zurückgerollte Entwürfe wiederauferstehen lassen.
+  const handleRestored = useCallback(
+    (message: string) => {
+      pushToast("success", message);
+      setHistoryRefresh((k) => k + 1);
+      setPendingRestore(true);
+      router.refresh();
+    },
+    [pushToast, router]
+  );
+
+  useEffect(() => {
+    if (!pendingRestore) return;
+    for (const timer of timersRef.current.values()) window.clearTimeout(timer);
+    timersRef.current.clear();
+    pendingValuesRef.current.clear();
+    setValues(initialValues);
+    setLiveMap(initialLiveValues);
+    setDirtyFields(new Set(draftFields));
+    setStatus(draftFields.length > 0 ? "saved" : "live");
+    setPublishError(null);
+    setExternalChange(false);
+    if (previewUrlSafe && iframeRef.current) {
+      iframeRef.current.src = site.preview_url;
+    }
+    void readLatestDraftStamp().then((stamp) => {
+      draftsBaselineRef.current = stamp;
+    });
+    setPendingRestore(false);
+  }, [pendingRestore, initialValues, initialLiveValues, draftFields, previewUrlSafe, site.preview_url, readLatestDraftStamp]);
+
   useEffect(() => {
     const timers = timersRef.current;
     return () => {
@@ -325,6 +409,10 @@ export function EditorClient({
           pushToast("error", `Entwurf konnte nicht gespeichert werden: ${error.message}`);
           return false;
         }
+        // W8: Eigene Speicherung als Basis merken (kein Fremd-Alarm dafür)
+        void readLatestDraftStamp().then((stamp) => {
+          if (stamp) draftsBaselineRef.current = stamp;
+        });
         return true;
       } catch {
         pushToast("error", "Supabase ist nicht erreichbar. Änderung wurde nicht gespeichert.");
@@ -336,7 +424,7 @@ export function EditorClient({
         }
       }
     },
-    [site.id, pushToast]
+    [site.id, pushToast, readLatestDraftStamp]
   );
 
   const handleChange = useCallback(
@@ -879,6 +967,34 @@ export function EditorClient({
         </div>
       )}
 
+      {/* W8: Hinweis bei Änderungen aus anderem Tab/Fenster (kein stiller Verlust) */}
+      {externalChange && (
+        <div className="border-b border-amber-200 bg-amber-50 px-6 py-3">
+          <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
+            <p className="min-w-0 flex-1 text-sm text-amber-900">
+              <span className="font-semibold">In einem anderen Fenster wurde gespeichert.</span>{" "}
+              Deine Ansicht ist möglicherweise veraltet – neu laden übernimmt den fremden Stand
+              (eigene ungespeicherte Eingaben dabei zuerst veröffentlichen oder kopieren).
+            </p>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-amber-500"
+            >
+              Neu laden
+            </button>
+            <button
+              type="button"
+              onClick={() => setExternalChange(false)}
+              className="rounded-lg px-3 py-1.5 text-xs font-medium text-amber-700 transition hover:bg-amber-100"
+            >
+              Ignorieren
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Handy-Umschalter: Bearbeiten <-> Vorschau (am PC immer beides nebeneinander) */}
       <div className="flex gap-1 border-b border-zinc-200 bg-white p-2 lg:hidden">
         <button
@@ -1314,7 +1430,7 @@ export function EditorClient({
         open={historyOpen}
         onClose={() => setHistoryOpen(false)}
         onError={pushErrorToast}
-        onSuccess={(msg) => pushToast("success", msg)}
+        onSuccess={handleRestored}
         refreshSignal={historyRefresh}
       />
 
