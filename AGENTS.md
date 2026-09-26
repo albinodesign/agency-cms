@@ -1,5 +1,7 @@
 # AGENTS.md
 
+> **Pflicht vor jeder Website-Arbeit:** `CMS-REFERENCE.md` (Root) ist der verbindliche Contract zwischen CMS und Website (Manifest, Content-Dateien, Marker, Preview-Protokoll, Banner, Validierung). **Bei Widersprüchen gewinnt immer `CMS-REFERENCE.md`.** Diese Datei hier beschreibt nur das CMS selbst.
+
 ## Projektübersicht
 
 **Agency CMS** ist das interne Kunden-CMS einer Webdesign-Agentur. Kunden können damit Texte und Bilder ihrer auf Vercel gehosteten Astro-Website selbst bearbeiten, ohne Code anzufassen. Änderungen werden zunächst als Entwürfe in Supabase gespeichert und beim Veröffentlichen per GitHub Contents API als Commit in das Website-Repository geschrieben; Vercel deployed den Push anschließend automatisch.
