@@ -11,6 +11,7 @@ import { StatusBadge } from "@/components/editor/StatusBadge";
 import type { SaveStatus } from "@/components/editor/StatusBadge";
 import { BannerCard } from "@/components/editor/BannerCard";
 import { FieldEditor } from "@/components/editor/FieldEditor";
+import { getPagePreviewUrl } from "@/lib/preview-url";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -26,6 +27,7 @@ import {
   Monitor,
   Newspaper,
   Rocket,
+  RotateCw,
   Search,
   Smartphone,
   Sparkles,
@@ -104,6 +106,13 @@ function isSafeFieldId(fieldId: string): boolean {
   );
 }
 
+/** Hinweis nach Navigation über einen Link innerhalb der Vorschau: Dann ist
+ * document.referrer die Website-Seite (document.referrer-Falle,
+ * CMS-REFERENCE.md Abschnitt 7) und Finden-Klicks kommen nicht mehr an. */
+const PREVIEW_INNER_NAV_HINT =
+  "Du hast in der Vorschau die Seite gewechselt – „Finden“ funktioniert dort nicht mehr. " +
+  "Bitte die Seite über die Seiten-Tabs wechseln oder die Vorschau neu laden.";
+
 /** Ermittelt die Seite einer Sektion (N3): erst Manifest-`page`, dann
  * Schlüsselwort-Heuristik über ID/Titel, sonst Dateipfad der Felder. */
 function detectPageLabel(section: ManifestSection): string {
@@ -140,6 +149,18 @@ export function EditorClient({
   const pendingRef = useRef(0);
   // Noch ungespeicherte Tipp-Stände je Feld (für garantierten Flush vor Publish)
   const pendingValuesRef = useRef<Map<string, string>>(new Map());
+  // Vorschau-Navigation (document.referrer-Falle, CMS-REFERENCE.md Abschnitt 7):
+  // Nur wenn das CMS die Vorschau-Seite selbst lädt (iframe.src setzen), ist
+  // document.referrer die CMS-Domain und Finden-Klicks kommen als
+  // CMS_FIELD_SELECT an. Nach Navigation über einen Link *innerhalb* der
+  // Vorschau ist der Referrer die Website-Seite und die Bridge verwirft
+  // jeden Klick still. Deshalb merken wir uns die letzte CMS-gesteuerte
+  // URL (previewPageRef) und ob das nächste Laden von uns kommt
+  // (expectPreviewLoadRef, initial true für das erste Laden).
+  const previewPageRef = useRef<string>(site.preview_url);
+  const expectPreviewLoadRef = useRef<boolean>(true);
+  // true, seit die Vorschau zuletzt über einen In-Preview-Link navigiert wurde
+  const innerNavRef = useRef<boolean>(false);
   // W11: Vorschau-Nachrichten bündeln – höchstens ein Schwung pro Frame,
   // damit schnelles Tippen das Iframe nicht flutet (fühlt sich gleich an).
   const previewQueueRef = useRef<Map<string, string>>(new Map());
@@ -221,6 +242,46 @@ export function EditorClient({
     },
     [previewOrigin]
   );
+
+  /** Schrägstriche am Ende entfernen (für URL-Vergleiche, nicht zum Anzeigen). */
+  const stripTrailingSlash = useCallback((url: string) => url.replace(/\/+$/, ""), []);
+
+  /** Lädt die Vorschau CMS-seitig (iframe.src direkt setzen): Dadurch ist
+   * document.referrer wieder die CMS-Domain und Finden-Klicks kommen an –
+   * egal, auf welcher Seite man sich befindet. Ohne force wird eine bereits
+   * angezeigte URL nicht neu geladen. */
+  const navigatePreview = useCallback(
+    (url: string, force = false) => {
+      if (!previewUrlSafe) return;
+      let target: string;
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return;
+        target = stripTrailingSlash(parsed.toString());
+      } catch {
+        return;
+      }
+      const frame = iframeRef.current;
+      if (!frame) return;
+      if (!force && stripTrailingSlash(previewPageRef.current) === target) return;
+      previewPageRef.current = target;
+      innerNavRef.current = false;
+      expectPreviewLoadRef.current = true;
+      frame.src = target;
+    },
+    [previewUrlSafe, stripTrailingSlash]
+  );
+
+  /** Lädt die zuletzt vom CMS angesteuerte Vorschau-Seite neu – stellt nach
+   * In-Preview-Navigation oder nach dem Aufbau den CMS-Referrer wieder her. */
+  const reloadPreview = useCallback(() => {
+    const frame = iframeRef.current;
+    if (!frame || !previewUrlSafe) return;
+    previewPageRef.current = frame.src;
+    innerNavRef.current = false;
+    expectPreviewLoadRef.current = true;
+    frame.src = frame.src;
+  }, [previewUrlSafe]);
   // W8: Parallele Tabs – neuester bekannter Entwurfs-Stempel + Warnung bei Fremdänderung
   const draftsBaselineRef = useRef<string | null>(null);
   const [externalChange, setExternalChange] = useState(false);
@@ -363,7 +424,11 @@ export function EditorClient({
       if (page.sections[0]) next.add(page.sections[0].id);
       return next;
     });
-  }, []);
+    // Vorschau CMS-seitig mitnehmen (iframe.src direkt setzen): Nur so bleibt
+    // document.referrer die CMS-Domain und Finden-Klicks melden danach
+    // weiterhin CMS_FIELD_SELECT – auch auf der Zielseite.
+    navigatePreview(getPagePreviewUrl(site.preview_url, page));
+  }, [navigatePreview, site.preview_url]);
 
   const expandAll = useCallback(() => {
     setOpenSections(new Set(visibleSections.map((s) => s.id)));
@@ -411,14 +476,13 @@ export function EditorClient({
     setStatus(draftFields.length > 0 ? "saved" : "live");
     setPublishError(null);
     setExternalChange(false);
-    if (previewUrlSafe && iframeRef.current) {
-      iframeRef.current.src = site.preview_url;
-    }
+    // Vorschau CMS-seitig zurücksetzen (mit CMS-Referrer, siehe navigatePreview)
+    navigatePreview(site.preview_url, true);
     void readLatestDraftStamp().then((stamp) => {
       draftsBaselineRef.current = stamp;
     });
     setPendingRestore(false);
-  }, [pendingRestore, initialValues, initialLiveValues, draftFields, previewUrlSafe, site.preview_url, readLatestDraftStamp]);
+  }, [pendingRestore, initialValues, initialLiveValues, draftFields, previewUrlSafe, site.preview_url, readLatestDraftStamp, navigatePreview]);
 
   useEffect(() => {
     const timers = timersRef.current;
@@ -636,9 +700,8 @@ export function EditorClient({
             if (deployPollRef.current) window.clearInterval(deployPollRef.current);
             deployPollRef.current = null;
             setDeployState("done");
-            if (iframeRef.current) {
-              iframeRef.current.src = iframeRef.current.src;
-            }
+            // Vorschau CMS-seitig neu laden (mit CMS-Referrer, siehe navigatePreview)
+            reloadPreview();
             return;
           }
           if (statusBody.state === "failure" || statusBody.state === "error") {
@@ -839,9 +902,32 @@ export function EditorClient({
     (enabled: boolean) => {
       setSelectMode(enabled);
       sendSelectMode(enabled);
+      // Wer nach In-Preview-Navigation zurück in den Finden-Modus schaltet,
+      // steht noch auf der Website-verlinkten Seite (ohne CMS-Referrer) –
+      // ehrlich sagen, statt Klicks versanden zu lassen.
+      if (enabled && innerNavRef.current) {
+        pushToast("error", PREVIEW_INNER_NAV_HINT);
+      }
     },
-    [sendSelectMode]
+    [sendSelectMode, pushToast]
   );
+
+  /** Jedes (Neu-)Laden der Vorschau: Klick-Modus erneut melden (die Website
+   * setzt beim Laden auf "Finden" zurück) und erkennen, ob die Navigation
+   * von einem Link *innerhalb* der Vorschau kam. Dann ist document.referrer
+   * die Website-Seite und die Bridge verwirft Finden-Klicks still – der
+   * Hinweis sagt, wie man zurückkommt (Seiten-Tabs, Neu laden). */
+  const handlePreviewLoad = useCallback(() => {
+    sendSelectMode(selectMode);
+    if (expectPreviewLoadRef.current) {
+      expectPreviewLoadRef.current = false;
+      return;
+    }
+    innerNavRef.current = true;
+    if (selectMode) {
+      pushToast("error", PREVIEW_INNER_NAV_HINT);
+    }
+  }, [sendSelectMode, selectMode, pushToast]);
 
   // Hört auf Klicks aus der Vorschau: Die Website schickt CMS_FIELD_SELECT
   // mit der Feld-ID, das CMS springt dann zum passenden Formularfeld.
@@ -1132,11 +1218,7 @@ export function EditorClient({
                       </p>
                       <div className="mt-3 flex flex-wrap gap-2">
                         <button
-                          onClick={() => {
-                            if (iframeRef.current) {
-                              iframeRef.current.src = iframeRef.current.src;
-                            }
-                          }}
+                          onClick={() => reloadPreview()}
                           className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-500"
                         >
                           Vorschau neu laden
@@ -1440,6 +1522,14 @@ export function EditorClient({
             </div>
             <div className="flex items-center gap-2">
             <button
+              onClick={() => reloadPreview()}
+              title="Lädt die zuletzt vom CMS angesteuerte Seite neu – stellt nach Seitenwechsel in der Vorschau die Feldsuche („Finden“) wieder her"
+              className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 transition hover:bg-zinc-200"
+            >
+              <RotateCw className="h-3.5 w-3.5" />
+              Neu laden
+            </button>
+            <button
               onClick={() => setViewport("desktop")}
               className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition ${
                 viewport === "desktop"
@@ -1478,8 +1568,9 @@ export function EditorClient({
                   title={`Vorschau: ${site.name}`}
                   className="h-full w-full"
                   // Nach jedem (Neu-)Laden der Vorschau den Klick-Modus erneut melden,
-                  // weil die Website beim Laden auf "Finden" zurücksetzt
-                  onLoad={() => sendSelectMode(selectMode)}
+                  // weil die Website beim Laden auf "Finden" zurücksetzt; gleichzeitig
+                  // In-Preview-Navigation erkennen (document.referrer-Falle).
+                  onLoad={handlePreviewLoad}
                 />
               ) : (
                 <div className="flex h-full w-full flex-col items-center justify-center gap-2 p-6 text-center">

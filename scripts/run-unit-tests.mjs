@@ -40,6 +40,7 @@ fs.writeFileSync(
       "src/lib/content-guard.ts",
       "src/lib/github.ts",
       "src/lib/history.ts",
+      "src/lib/preview-url.ts",
     ],
   })
 );
