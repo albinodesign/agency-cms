@@ -11,6 +11,12 @@
 alter table publish_history
   add column if not exists files text[] not null default '{}';
 
+-- Notiz-Spalte (z. B. "Rollback"): alte Tabellen kennen sie ggf. noch nicht.
+-- Ohne sie scheitert das Laden des Verlaufs ("column publish_history.note
+-- does not exist"); der Editor lädt ersatzweise ohne sie.
+alter table publish_history
+  add column if not exists note text;
+
 -- Bestehende Einträge nachpflegen (Dateinamen aus dem Payload ableiten)
 update publish_history
 set files = (

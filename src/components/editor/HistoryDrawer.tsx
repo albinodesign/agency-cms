@@ -35,33 +35,40 @@ export function HistoryDrawer({
       const supabase = createClient();
       // W11: Nur Metadaten laden (keine schweren Payloads – die bleiben in
       // der DB, bis eine Version wirklich zurückgerollt wird).
-      const meta = await supabase
-        .from("publish_history")
-        .select("id,site_id,published_by,commit_sha,created_at,note,files")
-        .eq("site_id", siteId)
-        .order("created_at", { ascending: false })
-        .limit(100);
+      // Robust gegen alte Tabellen: Fehlt note/files (Migration ausstehend),
+      // wird schrittweise kleiner geladen statt zu scheitern.
+      const BASIS = "id,site_id,published_by,commit_sha,created_at";
+      const lade = async (
+        spalten: string
+      ): Promise<{ data: PublishHistoryEntry[] | null; error: { message: string } | null }> => {
+        const res = await supabase
+          .from("publish_history")
+          .select(spalten)
+          .eq("site_id", siteId)
+          .order("created_at", { ascending: false })
+          .limit(100);
+        return res as unknown as {
+          data: PublishHistoryEntry[] | null;
+          error: { message: string } | null;
+        };
+      };
+      let meta = await lade(`${BASIS},note,files`);
+      if (meta.error && /\bnote\b/i.test(meta.error.message)) {
+        meta = await lade(`${BASIS},files`);
+      }
+      let filesVerfuegbar = true;
+      if (meta.error && /files/i.test(meta.error.message)) {
+        meta = await lade(BASIS);
+        filesVerfuegbar = false;
+      }
       if (meta.error) {
-        // files-Spalte fehlt (Migration ausstehend)? Dann klassisch voll laden.
-        if (/files/i.test(meta.error.message)) {
-          const voll = await supabase
-            .from("publish_history")
-            .select("*")
-            .eq("site_id", siteId)
-            .order("created_at", { ascending: false });
-          if (voll.error) {
-            onError(`Verlauf konnte nicht geladen werden: ${voll.error.message}`);
-            return;
-          }
-          setEntries((voll.data ?? []) as PublishHistoryEntry[]);
-          return;
-        }
-        onError(`Verlauf konnte nicht geladen werden: ${meta.error.message}`);
+        onError("Verlauf konnte nicht geladen werden. Details stehen im Server-Protokoll.");
         return;
       }
       let rows = (meta.data ?? []) as PublishHistoryEntry[];
-      // Legacy-Einträge ohne files: Dateinamen gebündelt nachladen (ein Abruf).
-      const ohneDateien = rows.filter((r) => !Array.isArray(r.files));
+      // Dateinamen fehlen (keine files-Spalte oder Legacy)? Gebündelt aus
+      // den Payloads nachladen (ein Abruf) statt die Liste zu verstecken.
+      const ohneDateien = filesVerfuegbar ? rows.filter((r) => !Array.isArray(r.files)) : rows;
       if (ohneDateien.length > 0) {
         const { data: payloads } = await supabase
           .from("publish_history")
