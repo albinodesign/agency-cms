@@ -51,7 +51,8 @@ export function HistoryDrawer({
         .from("publish_history")
         .select("id,site_id,published_by,commit_sha,created_at,note,files")
         .eq("site_id", siteId)
-        .order("created_at", { ascending: false });
+        .order("created_at", { ascending: false })
+        .limit(100);
       if (meta.error) {
         // files-Spalte fehlt (Migration ausstehend)? Dann klassisch voll laden.
         if (/files/i.test(meta.error.message)) {

@@ -19,7 +19,9 @@ import {
 } from "./ai";
 import type { AiFieldContext } from "./ai";
 import { getByPath, parsePathSafe, setByPath } from "./json-path";
+import type { DynamicListModel, TypeEntry } from "./content-guard";
 import {
+  DYNAMIC_LIST_MODELS,
   FREE_VALUE_MAX,
   SITE_JSON,
   SUPPORTED_FIELD_TYPES,
@@ -40,7 +42,6 @@ import {
   validateListStructures,
   validateScalarTypePreservation,
 } from "./content-guard";
-import type { TypeEntry } from "./content-guard";
 import { validateDraftValue, validateJsonValue } from "./validate";
 import type { FieldType } from "../types/cms";
 import { FREE_DRAFT_PREFIX } from "../types/cms";
@@ -79,6 +80,8 @@ export interface AiToolsDeps {
   serverFields: AiFieldContext[];
   store: AiDraftStore;
   repo: AiRepoReader;
+  /** Listenmodelle aus Standard + Manifest (W17, optional → nur Standard). */
+  modelle?: DynamicListModel[];
 }
 
 /** Standard-Lesebudget pro Aufruf (Paging statt Abschneiden). */
@@ -125,6 +128,8 @@ function missingBannerParts(candidate: Record<string, unknown> | undefined): str
 
 export function buildAiTools(deps: AiToolsDeps) {
   const { site, serverFields, store, repo } = deps;
+  // W17: Modelle aus Standard + Manifest (Chat und Publish teilen sich Regeln).
+  const modelle: DynamicListModel[] = deps.modelle ?? DYNAMIC_LIST_MODELS;
   const fieldMap = new Map(serverFields.map((f) => [f.id, f]));
   const byCanonical = manifestByCanonical(serverFields);
   // Gemeinsame Zielauflösung wie im Publish: kanonisches Ziel -> Typ/Länge/Label.
@@ -163,7 +168,7 @@ export function buildAiTools(deps: AiToolsDeps) {
           try {
             // Gemeinsame Typumwandlung wie im Publish (keine rohen Strings:
             // "true" auf Boolean-Feldern wird echtes true).
-            setByPath(candidate, known.path, convertEditValue(datei, known.path, d.value, typeMap, live));
+            setByPath(candidate, known.path, convertEditValue(datei, known.path, d.value, typeMap, live, modelle));
           } catch {
             // Alter Entwurf passt nicht mehr – ignorieren, Publish prüft streng.
           }
@@ -172,7 +177,7 @@ export function buildAiTools(deps: AiToolsDeps) {
         const free = parseFreeDraftIdSafe(d.field_id);
         if (free.ok && free.file === datei) {
           try {
-            setByPath(candidate, free.path, convertEditValue(datei, free.path, d.value, typeMap, live));
+            setByPath(candidate, free.path, convertEditValue(datei, free.path, d.value, typeMap, live, modelle));
           } catch {
             // Wie oben: Publish entscheidet.
           }
@@ -201,17 +206,17 @@ export function buildAiTools(deps: AiToolsDeps) {
     let hinweis: string | null = null;
     const pp = parsePathSafe(pfad);
     if (pp.ok) {
-      const missing = missingAppendKeys(datei, pp.segments, built.live, built.candidate);
+      const missing = missingAppendKeys(datei, pp.segments, built.live, built.candidate, modelle);
       if (missing.length > 0) {
         hinweis = `Noch unvollständig – ergänze noch als eigene Entwürfe: ${missing.join(", ")}. Erst dann veröffentlichen. Sage das dem Kunden ehrlich.`;
       }
     }
     if (hinweis === null) {
-      const pred = makeCoveragePredicate(typeMap);
+      const pred = makeCoveragePredicate(typeMap, modelle);
       const liveM = new Map([[datei, built.live]]);
       const candM = new Map([[datei, built.candidate]]);
       const struktur = [
-        ...validateListStructures(liveM, candM, pred),
+        ...validateListStructures(liveM, candM, pred, modelle),
         ...validateScalarTypePreservation(liveM, candM, pred),
       ];
       if (struktur.length > 0) {
@@ -403,7 +408,7 @@ export function buildAiTools(deps: AiToolsDeps) {
           // Publish: nur ausdrücklich modellierte Listen wachsen).
           if (verdict.creation?.kind === "append" && pp.ok) {
             const ctx = appendContextFor(pp.segments, built.live);
-            if (ctx && !findListModel(datei, ctx.listCanonical)) {
+            if (ctx && !findListModel(datei, ctx.listCanonical, modelle)) {
               return { fehler: fixedListGrowError(datei, ctx.listCanonical) };
             }
           }

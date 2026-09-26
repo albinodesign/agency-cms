@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireSiteAccess } from "@/lib/auth";
-import { insertPublishHistory } from "@/lib/history";
+import { beschraenkeVerlauf, insertPublishHistory } from "@/lib/history";
 import { commitFileWithRetry, createOctokit, getManifest, getRepoFile } from "@/lib/github";
 import { AI_MAX_FILE_CHARS, breaksBridge, isAllowedCodePath, isAllowedContentPath } from "@/lib/ai";
 import {
@@ -332,6 +332,8 @@ export async function POST(request: Request) {
       console.error("Rollback: publish_history insert fehlgeschlagen (Details oben).");
     } else {
       console.log(`publish_history: Rollback für Site ${siteId} gespeichert (Commit ${lastCommitSha ?? "unbekannt"})`);
+      // W18: Verlauf schlank halten (Fehler nur loggen)
+      await beschraenkeVerlauf(supabase, siteId);
     }
 
     const partialNote =

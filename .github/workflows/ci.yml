@@ -1,0 +1,23 @@
+# Agency CMS: Prüfung bei jedem Push und Pull-Request (W18).
+# Lint + Build (TypeScript strict) + alle Abnahme- und Unit-Suiten.
+# Kein Deploy, keine Secrets nötig (Build läuft mit Platzhalter-Config).
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  pruefen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm run test

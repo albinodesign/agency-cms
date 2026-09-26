@@ -138,6 +138,29 @@ Der Editor rendert seine Felder aus `src/content/cms.manifest.json` im Website-R
 - `maxLength` (optional): Zeichenbegrenzung inkl. Zähler im Editor (Überlänge wird live rot markiert, Publish hält die Datei zurück)
 - `placeholder` (optional): Beispieltext im leeren Feld
 
+**Dynamische Listen** (optional, `listenmodelle` auf oberster Manifest-Ebene):
+Nur ausdrücklich modellierte Listen dürfen per Entwurf am Ende wachsen –
+alle anderen Listen sind fest. Beispiel (Referenzen-Seite mit Titel + Sternen):
+
+```json
+{
+  "sections": [ ... ],
+  "listenmodelle": [
+    {
+      "datei": "src/content/pages/referenzen.json",
+      "pfad": "items",
+      "felder": { "titel": "text", "text": "text", "sterne": "number" }
+    }
+  ]
+}
+```
+
+Regeln: `datei` wie bei Feldern (nur `site.json`/`pages/*.json`), `pfad` als
+Punkt-Pfad ohne Index, 1–20 Felder mit gültigen Typen. Neue Elemente brauchen
+alle Felder typgerecht und keine fremden Schlüssel. Fehlerhafte Modelle lehnt
+das Veröffentlichen als Ganzes ab (Entwürfe bleiben). Eingebaut ist immer das
+FAQ-Modell (`faq.json`, `items` mit `frage` + `antwort`).
+
 ## Blog-Engine
 
 Wenn das Manifest das Blog-Feature aktiviert, erscheint im Editor ein zweiter Tab „Blog-Artikel":
@@ -267,6 +290,12 @@ Beide Seiten prüfen Herkunft UND Quelle: Die Website nimmt nur Nachrichten aus
 `CMS_ORIGINS` vom einbettenden Parent an, das CMS nur Nachrichten aus der
 hinterlegten Vorschau-Adresse vom eingebetteten Iframe (bei ungültiger Adresse
 ist der Empfang deaktiviert). `postMessage("*")` wird nirgends verwendet.
+
+## Betrieb: CI, Verlauf, Backup
+
+- **CI:** Bei jedem Push/PR läuft `.github/workflows/ci.yml` (Lint + Build + alle Tests). Ohne grünes CI nichts mergen.
+- **Verlauf:** Pro Website werden die neuesten 50 Versionen aufgehoben (ältere löscht das System nach Publish/Rollback automatisch). Der Verlauf lädt nur Metadaten; Inhalte kommen erst beim Zurückrollen.
+- **Backup:** Der Knopf „Meine Website (.zip)" lädt eine **reine Download-Kopie** herunter (Mitnahme, kein Lock-in). Zurückgespielt wird daraus nichts – ältere Stände stellt der **Verlauf** wieder her.
 
 ## Publish-Flow
 

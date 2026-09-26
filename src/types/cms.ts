@@ -37,6 +37,21 @@ export interface CmsManifest {
   features?: {
     blog?: boolean | { enabled?: boolean };
   };
+  /**
+   * Ausdrücklich modellierte dynamische Listen (W17): Nur diese Listen dürfen
+   * per Entwurf am Ende wachsen. Beispiel:
+   * { datei: "src/content/pages/referenzen.json", pfad: "items",
+   *   felder: { titel: "text", text: "text", sterne: "number" } }
+   * Ohne Eintrag sind alle Listen fest (bisheriges Verhalten).
+   */
+  listenmodelle?: Listenmodell[];
+}
+
+/** Deklaratives Wachstumsmodell einer Liste (Agentur-Regel im Manifest). */
+export interface Listenmodell {
+  datei: string;
+  pfad: string;
+  felder: Record<string, FieldType>;
 }
 
 export interface BlogFrontmatter {

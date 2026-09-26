@@ -4,8 +4,15 @@
  */
 import { getBySegments, parsePathSafe } from "../json-path";
 import { convertStoredValue, validateFinalJsonValue } from "../validate";
-import type { FieldType } from "../../types/cms";
-import { MANIFEST_PATH, SITE_JSON, isPlainObject, segmentsToCanonical } from "./base";
+import type { CmsManifest, FieldType } from "../../types/cms";
+import {
+  MANIFEST_PATH,
+  SITE_JSON,
+  SUPPORTED_FIELD_TYPES,
+  isAllowedFieldJsonFile,
+  isPlainObject,
+  segmentsToCanonical,
+} from "./base";
 import { bannerMaxLength, bannerTargetType } from "./banner";
 
 /**
@@ -68,10 +75,12 @@ export interface DynamicListModel {
 }
 
 /**
- * Derzeit einzig ausdrücklich modellierte dynamische Liste: die FAQ-Liste
+ * Derzeit einzig fest eingebautes dynamisches Listenmodell: die FAQ-Liste
  * in faq.json (Elemente mit frage + antwort als Text). Feste Sektionen wie
  * testimonials.items haben bewusst KEINEN Eintrag und wachsen daher nicht.
- * Erweiterung nur hier im Code (Agentur), niemals aus Kundendaten.
+ * Weitere Modelle legt die Agentur deklarativ im Manifest an
+ * (CmsManifest.listenmodelle, siehe modelleAusManifest) – niemals aus
+ * Kundendaten.
  */
 export const DYNAMIC_LIST_MODELS: DynamicListModel[] = [
   {
@@ -81,10 +90,83 @@ export const DYNAMIC_LIST_MODELS: DynamicListModel[] = [
   },
 ];
 
+/** Feldname für Modellschlüssel: schlicht, keine Tricks. */
+const MODELL_SCHLUESSEL = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+/**
+ * Baut die gültigen Listenmodelle aus Standard + Manifest (W17).
+ * Ungültige Manifest-Modelle werden mit deutschem Fehler gemeldet und
+ * ignoriert (der Publish bricht bei Modellfehlern als Ganzes ab).
+ */
+export function modelleAusManifest(
+  manifest: CmsManifest | null | undefined
+): { modelle: DynamicListModel[]; fehler: string[] } {
+  const modelle: DynamicListModel[] = [...DYNAMIC_LIST_MODELS];
+  const fehler: string[] = [];
+  const deklariert = manifest?.listenmodelle;
+  if (deklariert === undefined) return { modelle, fehler };
+  if (!Array.isArray(deklariert)) {
+    return { modelle, fehler: [`"listenmodelle" im Manifest muss eine Liste sein.`] };
+  }
+  deklariert.forEach((eintrag, index) => {
+    const nummer = `Listenmodell Nr. ${index + 1}`;
+    if (typeof eintrag !== "object" || eintrag === null) {
+      fehler.push(`${nummer} ist ungültig (kein Objekt) und wird ignoriert.`);
+      return;
+    }
+    const { datei, pfad, felder } = eintrag as { datei?: unknown; pfad?: unknown; felder?: unknown };
+    if (typeof datei !== "string" || !isAllowedFieldJsonFile(datei)) {
+      fehler.push(`${nummer}: "${String(datei)}" ist kein erlaubtes Inhaltsziel (erlaubt: src/content/site.json und JSON-Dateien unter src/content/pages/).`);
+      return;
+    }
+    if (typeof pfad !== "string") {
+      fehler.push(`${nummer}: Der Listenpfad fehlt oder ist kein Text.`);
+      return;
+    }
+    const geparst = parsePathSafe(pfad);
+    if (!geparst.ok || geparst.segments.some((s) => typeof s !== "string")) {
+      fehler.push(`${nummer}: Der Listenpfad "${pfad}" ist ungültig (erwartet: Punkt-Pfad wie "items" oder "bereich.items", ohne Index).`);
+      return;
+    }
+    if (typeof felder !== "object" || felder === null || Array.isArray(felder)) {
+      fehler.push(`${nummer}: "felder" muss ein Objekt wie { frage: "text" } sein.`);
+      return;
+    }
+    const schluessel = Object.keys(felder);
+    if (schluessel.length === 0 || schluessel.length > 20) {
+      fehler.push(`${nummer}: "felder" braucht 1 bis 20 Einträge.`);
+      return;
+    }
+    const required: Record<string, FieldType> = {};
+    for (const key of schluessel) {
+      if (!MODELL_SCHLUESSEL.test(key)) {
+        fehler.push(`${nummer}: Feldname "${key}" ist ungültig (erlaubt: Buchstabe + Buchstaben/Zahlen/Unterstrich).`);
+        return;
+      }
+      const typ = (felder as Record<string, unknown>)[key];
+      if (!SUPPORTED_FIELD_TYPES.includes(typ as FieldType)) {
+        fehler.push(`${nummer}: Typ "${String(typ)}" für "${key}" wird nicht unterstützt.`);
+        return;
+      }
+      required[key] = typ as FieldType;
+    }
+    const kanonisch = geparst.canonical;
+    const vorhanden = modelle.findIndex((m) => m.file === datei && m.path === kanonisch);
+    const modell: DynamicListModel = { file: datei, path: kanonisch, required };
+    if (vorhanden >= 0) modelle[vorhanden] = modell;
+    else modelle.push(modell);
+  });
+  return { modelle, fehler };
+}
+
 /** Findet das ausdrückliche Wachstumsmodell einer Liste (null = feste Liste). */
-export function findListModel(file: string, listCanonical: string): DynamicListModel | null {
+export function findListModel(
+  file: string,
+  listCanonical: string,
+  modelle: DynamicListModel[] = DYNAMIC_LIST_MODELS
+): DynamicListModel | null {
   return (
-    DYNAMIC_LIST_MODELS.find((m) => m.file === file && m.path === listCanonical) ?? null
+    modelle.find((m) => m.file === file && m.path === listCanonical) ?? null
   );
 }
 
@@ -133,11 +215,12 @@ export function appendContextFor(
 export function modelTypeForAppend(
   file: string,
   segments: Array<string | number>,
-  liveJson: Record<string, unknown> | undefined
+  liveJson: Record<string, unknown> | undefined,
+  modelle: DynamicListModel[] = DYNAMIC_LIST_MODELS
 ): FieldType | null {
   const ctx = appendContextFor(segments, liveJson);
   if (!ctx || ctx.rest.length !== 1 || typeof ctx.rest[0] !== "string") return null;
-  const model = findListModel(file, ctx.listCanonical);
+  const model = findListModel(file, ctx.listCanonical, modelle);
   if (!model) return null;
   return model.required[ctx.rest[0]] ?? null;
 }
@@ -153,7 +236,8 @@ export function resolveEditType(
   segments: Array<string | number>,
   canonical: string | null,
   typeMap: Map<string, TypeEntry>,
-  liveJson: Record<string, unknown> | undefined
+  liveJson: Record<string, unknown> | undefined,
+  modelle: DynamicListModel[] = DYNAMIC_LIST_MODELS
 ): ResolvedEditType {
   if (canonical) {
     const declared = typeMap.get(canonical);
@@ -174,7 +258,7 @@ export function resolveEditType(
       via: "banner",
     };
   }
-  const modelType = modelTypeForAppend(file, segments, liveJson);
+  const modelType = modelTypeForAppend(file, segments, liveJson, modelle);
   if (modelType) {
     return { type: modelType, label: String(segments[segments.length - 1]), via: "modell" };
   }
@@ -192,7 +276,8 @@ export function convertEditValue(
   editPath: string,
   rawValue: string,
   typeMap: Map<string, TypeEntry>,
-  liveJson: Record<string, unknown> | undefined
+  liveJson: Record<string, unknown> | undefined,
+  modelle: DynamicListModel[] = DYNAMIC_LIST_MODELS
 ): unknown {
   const parsed = parsePathSafe(editPath);
   if (!parsed.ok) return rawValue;
@@ -201,7 +286,8 @@ export function convertEditValue(
     parsed.segments,
     `${file}#${parsed.canonical}`,
     typeMap,
-    liveJson
+    liveJson,
+    modelle
   );
   return convertStoredValue(resolved.type, rawValue);
 }
@@ -308,11 +394,12 @@ export function missingAppendKeys(
   file: string,
   segments: Array<string | number>,
   liveJson: Record<string, unknown> | undefined,
-  candidate: Record<string, unknown>
+  candidate: Record<string, unknown>,
+  modelle: DynamicListModel[] = DYNAMIC_LIST_MODELS
 ): string[] {
   const ctx = appendContextFor(segments, liveJson);
   if (!ctx || ctx.rest.length > 1) return [];
-  const model = findListModel(file, ctx.listCanonical);
+  const model = findListModel(file, ctx.listCanonical, modelle);
   if (!model) return [];
   const element = getBySegments(candidate, [...ctx.listSegments, ctx.index]);
   if (!isPlainObject(element)) return Object.keys(model.required);
@@ -352,7 +439,8 @@ function typName(value: unknown): string {
  * am Kandidatenwert. Gemeinsam für Publish und Chat.
  */
 export function makeCoveragePredicate(
-  typeMap: Map<string, TypeEntry>
+  typeMap: Map<string, TypeEntry>,
+  modelle: DynamicListModel[] = DYNAMIC_LIST_MODELS
 ): (file: string, canonical: string) => boolean {
   return (file: string, canonical: string): boolean => {
     if (typeMap.has(`${file}#${canonical}`)) return true;
@@ -364,7 +452,7 @@ export function makeCoveragePredicate(
     ) {
       return true;
     }
-    for (const m of DYNAMIC_LIST_MODELS) {
+    for (const m of modelle) {
       if (
         m.file === file &&
         (canonical === m.path ||
@@ -478,7 +566,8 @@ function compareFixedShape(
 export function validateListStructures(
   liveFiles: Map<string, Record<string, unknown>>,
   candidateFiles: Map<string, Record<string, unknown>>,
-  isCovered: (file: string, canonical: string) => boolean = () => false
+  isCovered: (file: string, canonical: string) => boolean = () => false,
+  modelle: DynamicListModel[] = DYNAMIC_LIST_MODELS
 ): string[] {
   const errors: string[] = [];
   for (const [file, live] of liveFiles) {
@@ -511,7 +600,7 @@ export function validateListStructures(
         continue;
       }
       if (!Array.isArray(liveArr)) continue;
-      const model = findListModel(file, spot.canonical);
+      const model = findListModel(file, spot.canonical, modelle);
       // Das Modell gilt für den gesamten Endstand, auch wenn die Liste
       // gekürzt wird. Wachstum und Länge regeln anschließend nur den Umbau.
       if (model) {

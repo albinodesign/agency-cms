@@ -927,7 +927,7 @@ export function EditorClient({
           <button
             onClick={() => void handleBackup()}
             disabled={backupLoading}
-            title="Deine Website gehört dir: Lade sie jederzeit als .zip herunter und nimm sie mit, wohin du willst – keine Bindung, kein Lock-in."
+            title="Deine Website gehört dir: Lade sie als .zip herunter (reine Kopie). Zum Wiederherstellen älterer Stände dient der Verlauf – aus der .zip wird nichts zurückgespielt."
             className="flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-60"
           >
             {backupLoading ? (
