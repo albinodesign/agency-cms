@@ -19,23 +19,18 @@ import {
 } from "./ai";
 import type { AiFieldContext } from "./ai";
 import { getByPath, parsePathSafe, setByPath } from "./json-path";
-import type { DynamicListModel, TypeEntry } from "./content-guard";
+import type { TypeEntry } from "./content-guard";
 import {
-  DYNAMIC_LIST_MODELS,
   FREE_VALUE_MAX,
   SITE_JSON,
   SUPPORTED_FIELD_TYPES,
-  appendContextFor,
   canonicalTarget,
   classifyFreeTarget,
   convertEditValue,
-  findListModel,
-  fixedListGrowError,
   getBannerProblems,
   isAllowedFieldJsonFile,
   isPlainObject,
   makeCoveragePredicate,
-  missingAppendKeys,
   parseFreeDraftIdSafe,
   validateBannerValue,
   validateJsonPath,
@@ -80,8 +75,6 @@ export interface AiToolsDeps {
   serverFields: AiFieldContext[];
   store: AiDraftStore;
   repo: AiRepoReader;
-  /** Listenmodelle aus Standard + Manifest (W17, optional → nur Standard). */
-  modelle?: DynamicListModel[];
 }
 
 /** Standard-Lesebudget pro Aufruf (Paging statt Abschneiden). */
@@ -128,8 +121,6 @@ function missingBannerParts(candidate: Record<string, unknown> | undefined): str
 
 export function buildAiTools(deps: AiToolsDeps) {
   const { site, serverFields, store, repo } = deps;
-  // W17: Modelle aus Standard + Manifest (Chat und Publish teilen sich Regeln).
-  const modelle: DynamicListModel[] = deps.modelle ?? DYNAMIC_LIST_MODELS;
   const fieldMap = new Map(serverFields.map((f) => [f.id, f]));
   const byCanonical = manifestByCanonical(serverFields);
   // Gemeinsame Zielauflösung wie im Publish: kanonisches Ziel -> Typ/Länge/Label.
@@ -168,7 +159,7 @@ export function buildAiTools(deps: AiToolsDeps) {
           try {
             // Gemeinsame Typumwandlung wie im Publish (keine rohen Strings:
             // "true" auf Boolean-Feldern wird echtes true).
-            setByPath(candidate, known.path, convertEditValue(datei, known.path, d.value, typeMap, live, modelle));
+            setByPath(candidate, known.path, convertEditValue(datei, known.path, d.value, typeMap));
           } catch {
             // Alter Entwurf passt nicht mehr – ignorieren, Publish prüft streng.
           }
@@ -177,7 +168,7 @@ export function buildAiTools(deps: AiToolsDeps) {
         const free = parseFreeDraftIdSafe(d.field_id);
         if (free.ok && free.file === datei) {
           try {
-            setByPath(candidate, free.path, convertEditValue(datei, free.path, d.value, typeMap, live, modelle));
+            setByPath(candidate, free.path, convertEditValue(datei, free.path, d.value, typeMap));
           } catch {
             // Wie oben: Publish entscheidet.
           }
@@ -192,31 +183,23 @@ export function buildAiTools(deps: AiToolsDeps) {
   /**
    * Bestimmt den Entwurfsstatus aus dem zusammengesetzten Stand (Live plus
    * ALLE gespeicherten Entwürfe, inkl. der gerade gespeicherten Änderung):
-   * Fehlende Modellschlüssel, Struktur-/Typabweichungen und Banner-Lücken
-   * führen zu hinweis + veroeffentlichbar=false – auch bei Korrekturen und
-   * über beide Zugriffswege (Feld-ID oder datei+pfad). Ein fehlender Hinweis
-   * allein beweist keine Veröffentlichungsfähigkeit; maßgeblich bleibt Publish.
+   * Struktur-/Typabweichungen und Banner-Lücken führen zu hinweis +
+   * veroeffentlichbar=false – auch bei Korrekturen und über beide
+   * Zugriffswege (Feld-ID oder datei+pfad). Ein fehlender Hinweis allein
+   * beweist keine Veröffentlichungsfähigkeit; maßgeblich bleibt Publish.
    */
   async function statusAfterStore(
-    datei: string,
-    pfad: string
+    datei: string
   ): Promise<{ hinweis: string | null; veroeffentlichbar: boolean }> {
     const built = await buildCandidate(datei);
     if ("fehler" in built) return { hinweis: null, veroeffentlichbar: true };
     let hinweis: string | null = null;
-    const pp = parsePathSafe(pfad);
-    if (pp.ok) {
-      const missing = missingAppendKeys(datei, pp.segments, built.live, built.candidate, modelle);
-      if (missing.length > 0) {
-        hinweis = `Noch unvollständig – ergänze noch als eigene Entwürfe: ${missing.join(", ")}. Erst dann veröffentlichen. Sage das dem Kunden ehrlich.`;
-      }
-    }
     if (hinweis === null) {
-      const pred = makeCoveragePredicate(typeMap, modelle);
+      const pred = makeCoveragePredicate(typeMap);
       const liveM = new Map([[datei, built.live]]);
       const candM = new Map([[datei, built.candidate]]);
       const struktur = [
-        ...validateListStructures(liveM, candM, pred, modelle),
+        ...validateListStructures(liveM, candM, pred),
         ...validateScalarTypePreservation(liveM, candM, pred),
       ];
       if (struktur.length > 0) {
@@ -324,7 +307,7 @@ export function buildAiTools(deps: AiToolsDeps) {
     }),
     schreibeInhalt: tool({
       description:
-        "Ändert einen Inhalt als Entwurf (geht NICHT live, nur Vorbereitung). Entweder feldId ODER datei+pfad angeben. Unzulässige Ziele werden mit Fehler abgelehnt (kein stilles Speichern). Unvollständige Ergänzungen werden ehrlich als hinweis gemeldet – veröffentlichen darf sich das erst vollständig.",
+        "Ändert einen Inhalt als Entwurf (geht NICHT live, nur Vorbereitung). Entweder feldId ODER datei+pfad angeben. Unzulässige Ziele (inkl. Listen-Ergänzungen – alle Listen sind fest) werden mit Fehler abgelehnt (kein stilles Speichern).",
       inputSchema: z.object({
         feldId: z.string().optional().describe("Feld-ID aus der Feldliste, z. B. hero.title"),
         datei: z.string().optional().describe("Nur ohne feldId: Zieldatei, z. B. src/content/pages/home.json"),
@@ -355,7 +338,7 @@ export function buildAiTools(deps: AiToolsDeps) {
           }
           const { error } = await store.storeDraft(site.id, feldId, wert);
           if (error) return { fehler: `Entwurf konnte nicht gespeichert werden: ${error.message}` };
-          const status = await statusAfterStore(field.file, field.path);
+          const status = await statusAfterStore(field.file);
           return {
             art: "feld",
             feldId,
@@ -403,21 +386,14 @@ export function buildAiTools(deps: AiToolsDeps) {
               if (bannerProblem) return { fehler: `Banner: ${bannerProblem}` };
             }
           }
-          // Feste Listen schon beim ersten Schritt ehrlich ablehnen statt
-          // einen nicht fertigstellbaren Entwurf zu beginnen (gemeinsam mit
-          // Publish: nur ausdrücklich modellierte Listen wachsen).
-          if (verdict.creation?.kind === "append" && pp.ok) {
-            const ctx = appendContextFor(pp.segments, built.live);
-            if (ctx && !findListModel(datei, ctx.listCanonical, modelle)) {
-              return { fehler: fixedListGrowError(datei, ctx.listCanonical) };
-            }
-          }
+          // Alle Listen sind fest: Ergänzungen scheitern bereits oben in
+          // classifyFreeTarget (kein Modell mehr) – hier geht es nur weiter
+          // für Bestand und Banner-Erstellungen.
           const freeId = `${FREE_DRAFT_PREFIX}${datei}:${pfad}`;
           const { error } = await store.storeDraft(site.id, freeId, wert);
           if (error) return { fehler: `Entwurf konnte nicht gespeichert werden: ${error.message}` };
-          // Status aus dem zusammengesetzten Entwurf (gilt auch für
-          // Korrekturen begonnener Einträge, nicht nur frische Anhänge).
-          const status = await statusAfterStore(datei, pfad);
+          // Status aus dem zusammengesetzten Entwurf.
+          const status = await statusAfterStore(datei);
           return {
             art: "frei",
             feldId: freeId,

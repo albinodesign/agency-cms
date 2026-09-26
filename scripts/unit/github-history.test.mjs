@@ -38,6 +38,17 @@ test("normalizeManifest bleibt verhaltensgleich", () => {
   assert.equal(m.sections[0].id, "content");
 });
 
+test("normalizeManifest: page bleibt erhalten (sonst Heuristik)", () => {
+  const { manifest } = github.normalizeManifestWithWarnings({
+    sections: [
+      { id: "a", title: "A", page: "Startseite", fields: [{ id: "f", type: "text", file: "src/content/pages/h.json", path: "x" }] },
+      { id: "b", title: "B", fields: [{ id: "g", type: "text", file: "src/content/pages/h.json", path: "y" }] },
+    ],
+  });
+  assert.equal(manifest.sections[0].page, "Startseite");
+  assert.equal("page" in manifest.sections[1], false);
+});
+
 test("githubFehlerGrund: bekannt konkret, Rest allgemein", () => {
   assert.match(github.githubFehlerGrund({ status: 404 }), /gelöscht oder verschoben/);
   assert.match(github.githubFehlerGrund({ status: 409 }), /erneut versuchen/);

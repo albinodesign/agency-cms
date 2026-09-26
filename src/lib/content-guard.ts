@@ -6,7 +6,7 @@
  * - banner.ts: CMS-Banner-Regeln (Stil-Enum, 160 Zeichen, Dreifaltigkeit)
  * - field-targets.ts: Manifest-Zielprüfung (Duplikate, Typen, Pfad-Existenz)
  * - free-drafts.ts: freie Aliase und Voll-Datei-Prüfung
- * - list-models.ts: Listenmodelle, Typauflösung und Strukturprüfung
+ * - list-models.ts: Typauflösung und Strukturprüfung (alle Listen fest)
  *
  * Alle bestehenden Importe von "@/lib/content-guard" funktionieren
  * unverändert weiter (gleiche Namen, gleiche Funktionen).

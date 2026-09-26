@@ -361,12 +361,9 @@ module.exports = Object.assign({}, real, {
     ok(r.commits.length === 0 && r.draftsLeft === 1 && r.codeLeft === 1, "R-R2 kein Write, alle Entwürfe bleiben");
   }
 
-  // R-R3: Demo-Listenmodell – KORREKTUR 1d: Das unveränderte Demo-Schema erlaubt
-  // genau drei Einträge in testimonials.items (feste Bewertungssektion ohne
-  // dynamisches Modell). Auch eine vollständige 4. Bewertung wird daher mit
-  // 400 abgelehnt (früher fälschlich 200). Unvollständiges nennt die feste
-  // Liste als Grund; erlaubtes Wachstum gibt es nur mit ausdrücklichem Modell
-  // (siehe 1d-Nachprüfung D-L2/D-L3 mit der FAQ-Liste).
+  // R-R3 (Referenz 1.1): Alle Listen sind fest – auch eine vollständige
+  // 4. Bewertung wird mit 400 abgelehnt. Unvollständiges nennt die feste
+  // Liste als Grund.
   {
     const files = Object.assign({}, BASE_FILES, {
       "src/content/pages/bewertungen.json": JSON.stringify({ testimonials: DEMO_TESTIMONIALS }),
@@ -520,7 +517,9 @@ module.exports = Object.assign({}, real, {
     ok(!good.fehler && good.art === "feld" && h1.stored.length === 1, "P-P2 gültiges Feld gespeichert");
     const h2 = toolHarness({ files: faqFiles, drafts: [], serverFields: heroFields });
     const inc = await h2.tools.schreibeInhalt.execute({ datei: "src/content/pages/faq.json", pfad: "items[2].frage", wert: "Neu?" });
-    ok(!inc.fehler && typeof inc.hinweis === "string" && /antwort/.test(inc.hinweis), "P-P2 unvollständige Ergänzung ehrlich markiert");
+    // Referenz 1.1: keine Liste darf wachsen – Ergänzung wird sofort mit Fehler
+    // abgelehnt statt als unvollständiger Entwurf gespeichert.
+    ok(inc.fehler && /fest/.test(inc.fehler) && h2.stored.length === 0, "P-P2 Listenergänzung abgelehnt (alle Listen fest), nichts gespeichert");
   }
 }
 

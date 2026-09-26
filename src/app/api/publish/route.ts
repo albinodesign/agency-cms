@@ -19,7 +19,6 @@ import {
   getBannerProblems,
   isAllowedFieldJsonFile,
   makeCoveragePredicate,
-  modelleAusManifest,
   parseFreeDraftIdSafe,
   resolveEditType,
   validateBannerValue,
@@ -266,17 +265,6 @@ export async function POST(request: Request) {
       );
     }
 
-    // W17: Listenmodelle aus Standard + effektivem Manifest (deklarativ statt
-    // hardcodiert). Fehlerhafte Modell-Deklarationen brechen den ganzen Satz
-    // ab – die gemeinsame Grundlage wäre sonst unklar.
-    const { modelle: listenModelle, fehler: modellFehler } = modelleAusManifest(effectiveNormalized);
-    if (modellFehler.length > 0) {
-      return NextResponse.json(
-        { error: `Bitte korrigiere zuerst die Listenmodelle im Manifest (es wurde nichts veröffentlicht, Entwürfe bleiben erhalten):\n- ${modellFehler.join("\n- ")}` },
-        { status: 400 }
-      );
-    }
-
     // Aufgelöste Zieltypen je kanonischem Ziel (einheitlich für Manifestfeld,
     // freien Alias und vollständige Datei-Inhalte – dieselbe Auflösung wie im
     // Chat; ein Alias erbt Typ, Länge und Label des Felds).
@@ -302,9 +290,7 @@ export async function POST(request: Request) {
         file,
         pp.segments,
         `${file}#${pp.canonical}`,
-        typeMap,
-        parsedJson.get(file),
-        listenModelle
+        typeMap
       );
       return {
         type: r.type,
@@ -560,10 +546,8 @@ export async function POST(request: Request) {
     }
 
     // Freie Ziele einordnen: Bestand schreiben oder ausdrücklich freigegebene
-    // Erstellung (Banner-Felder, Listen-Ergänzung). Akzeptierte Erstellungen
-    // decken passende Manifestfeld-Pfade im selben Satz ab. Ob eine
-    // Listen-Ergänzung veröffentlichbar ist, prüft erst die gemeinsame
-    // Strukturprüfung am fertigen Kandidaten (feste Listen wachsen nicht).
+    // Erstellung (nur Banner-Felder – alle Listen sind fest). Akzeptierte
+    // Erstellungen decken passende Manifestfeld-Pfade im selben Satz ab.
     const pendingCreations = new Set<string>();
     for (const [filePath, fileEdits] of editsByFile) {
       if (blocked.has(filePath)) continue;
@@ -634,7 +618,7 @@ export async function POST(request: Request) {
       for (const edit of fileEdits) {
         const label = resolveEdit(filePath, edit.path, edit.fieldId).label;
         try {
-          setByPath(cand, edit.path, convertEditValue(filePath, edit.path, edit.value, typeMap, parsedJson.get(filePath), listenModelle));
+          setByPath(cand, edit.path, convertEditValue(filePath, edit.path, edit.value, typeMap));
         } catch (err) {
           block(
             filePath,
@@ -647,7 +631,7 @@ export async function POST(request: Request) {
     // Strenge Prüfung je ANGEFASSTER Datei (Mittelweg: Unberührtes blockiert
     // nichts mehr): effektives Manifest, strikte Endtypen, Banner-Endstand,
     // Listen-Strukturen und Typtreue – jeweils nur dort, wo der Satz schreibt.
-    const isCovered = makeCoveragePredicate(typeMap, listenModelle);
+    const isCovered = makeCoveragePredicate(typeMap);
     const touchedJsonFiles = new Set<string>();
     for (const [filePath] of editsByFile) {
       if (candidateJson.has(filePath)) touchedJsonFiles.add(filePath);
@@ -691,7 +675,7 @@ export async function POST(request: Request) {
       // Listen + Typtreue dieser Datei.
       const liveM = new Map([[filePath, live]]);
       const candM = new Map([[filePath, cand]]);
-      for (const e of validateListStructures(liveM, candM, isCovered, listenModelle)) block(filePath, e);
+      for (const e of validateListStructures(liveM, candM, isCovered)) block(filePath, e);
       for (const e of validateScalarTypePreservation(liveM, candM, isCovered)) block(filePath, e);
     }
 
